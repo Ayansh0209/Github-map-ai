@@ -10,7 +10,7 @@ import {
     FunctionExpression,
     MethodDeclaration,
 } from "ts-morph";
-import { FunctionNode } from "../models/schema";
+import { FunctionNode, Visibility } from "../models/schema";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -86,8 +86,10 @@ function extractFromFunctionDeclaration(
         startLine: node.getStartLineNumber(),
         endLine: node.getEndLineNumber(),
         isExported: node.isExported(),
+        kind: node.isAsync() ? "async" : "function",
         calls: extractCallNames(node),
-        calledBy: [], // filled in by graph builder
+        calledBy: [],
+        analysisConfidence: "high",
     };
 }
 
@@ -121,9 +123,17 @@ function extractFromArrowOrExpression(
         startLine: node.getStartLineNumber(),
         endLine: node.getEndLineNumber(),
         isExported: isExported(node),
+        kind: "arrow",
         calls: extractCallNames(node),
         calledBy: [],
+        analysisConfidence: "high",
     };
+}
+
+function getVisibility(node: MethodDeclaration): Visibility {
+    if (node.hasModifier(SyntaxKind.PrivateKeyword)) return "private";
+    if (node.hasModifier(SyntaxKind.ProtectedKeyword)) return "protected";
+    return "public";
 }
 
 function extractFromMethod(
@@ -145,8 +155,12 @@ function extractFromMethod(
         startLine: node.getStartLineNumber(),
         endLine: node.getEndLineNumber(),
         isExported: isExported(node),
+        kind: node.isAsync() ? "async" : "method",
+        visibility: getVisibility(node),
+        parentId: className ? `${relativePath}::${className}` : undefined,
         calls: extractCallNames(node),
         calledBy: [],
+        analysisConfidence: "high",
     };
 }
 

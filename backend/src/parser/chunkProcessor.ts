@@ -4,9 +4,10 @@
 // This is the only file that touches ts-morph directly
 
 import path from "path";
+import fs from "fs";
 import { Project, ScriptTarget, ModuleKind } from "ts-morph";
 import { ParseDecision } from "../processing/sizeHandler";
-import { FileNode, ImportEdge, FunctionNode } from "../models/schema";
+import { FileNode, ImportEdge, FunctionNode, FileKind } from "../models/schema";
 import { extractFileLevel } from "./fileLevel";
 import { extractFunctionLevel } from "./functionLevel";
 import { ImportResolver } from "./importResolver";
@@ -26,6 +27,55 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 
 function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ── File kind / entry point helpers ──────────────────────────────────────────
+
+function detectFileKind(relativePath: string): FileKind {
+    const filename = path.basename(relativePath).toLowerCase();
+    if (filename.endsWith(".d.ts")) return "declaration";
+    if (
+        filename.includes(".test.") ||
+        filename.includes(".spec.") ||
+        filename.includes("__tests__")
+    ) return "test";
+    if (
+        filename.startsWith("jest.config") ||
+        filename.startsWith("vite.config") ||
+        filename.startsWith("webpack.config") ||
+        filename.startsWith("tsdown.config") ||
+        filename.startsWith("rollup.config") ||
+        filename.startsWith("eslint.config") ||
+        filename.startsWith("prettier.config") ||
+        filename.startsWith("lint-staged.config") ||
+        filename.startsWith("babel.config") ||
+        filename.startsWith("next.config") ||
+        filename.startsWith("nuxt.config") ||
+        filename.startsWith("tailwind.config") ||
+        filename.startsWith("postcss.config")
+    ) return "config";
+    return "source";
+}
+
+function detectIsEntryPoint(relativePath: string): boolean {
+    const filename = path.basename(relativePath).toLowerCase();
+    const ENTRY_NAMES = new Set([
+        "index.ts", "index.js", "index.tsx", "index.jsx",
+        "main.ts", "main.js",
+        "server.ts", "server.js",
+        "app.ts", "app.js",
+        "entry.ts", "entry.js",
+    ]);
+    return ENTRY_NAMES.has(filename);
+}
+
+function countLines(absolutePath: string): number {
+    try {
+        const content = fs.readFileSync(absolutePath, "utf-8");
+        return content.split("\n").length;
+    } catch {
+        return 0;
+    }
 }
 
 // ── Result types ─────────────────────────────────────────────────────────────
@@ -91,6 +141,7 @@ async function processChunk(
 
             // Resolve raw imports → ImportEdges
             const resolvedEdges: ImportEdge[] = [];
+            const unresolvedImports: string[] = [];
 
             for (const rawImport of fileLevelResult.rawImports) {
                 const resolved = resolver.resolve(
@@ -104,9 +155,16 @@ async function processChunk(
                         target: resolved.resolvedPath,
                         kind: rawImport.kind,
                         symbols: rawImport.symbols,
+                        isTypeOnly: rawImport.isTypeOnly,
                     });
+                } else if (
+                    rawImport.specifier.startsWith(".") &&
+                    resolved.kind === "external"
+                ) {
+                    // relative import that couldn't be resolved on disk — truly unresolved
+                    unresolvedImports.push(rawImport.specifier);
                 }
-                // external imports are recorded on FileNode, not as edges
+                // external (node_modules) imports are recorded on FileNode, not as edges
             }
 
             importEdges.push(...resolvedEdges);
@@ -134,9 +192,13 @@ async function processChunk(
                 language,
                 path: decision.relativePath,
                 sizeBytes: decision.sizeBytes,
+                lineCount: countLines(decision.absolutePath),
                 parseStatus: decision.mode === "skip" ? "skipped" : decision.mode,
-                functions,                            // attached here for per-file R2 upload
+                kind: detectFileKind(decision.relativePath),
+                isEntryPoint: detectIsEntryPoint(decision.relativePath),
+                functions,
                 externalImports: fileLevelResult.externalImports,
+                unresolvedImports,
             });
 
         } catch (err) {
@@ -151,9 +213,13 @@ async function processChunk(
                 language: "unknown",
                 path: decision.relativePath,
                 sizeBytes: decision.sizeBytes,
+                lineCount: countLines(decision.absolutePath),
                 parseStatus: "skipped",
+                kind: detectFileKind(decision.relativePath),
+                isEntryPoint: detectIsEntryPoint(decision.relativePath),
                 functions: [],
                 externalImports: [],
+                unresolvedImports: [],
             });
         }
     }
@@ -217,9 +283,13 @@ export async function processAllFiles(
             language: "unknown",
             path: decision.relativePath,
             sizeBytes: decision.sizeBytes,
+            lineCount: countLines(decision.absolutePath),
             parseStatus: "skipped",
+            kind: detectFileKind(decision.relativePath),
+            isEntryPoint: detectIsEntryPoint(decision.relativePath),
             functions: [],
             externalImports: [],
+            unresolvedImports: [],
         });
     }
 

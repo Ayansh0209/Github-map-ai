@@ -12,6 +12,7 @@ import {
 } from "../github/downlaod";
 import { decideParsing } from "../processing/parseDecider";
 import { processAllFiles } from "../parser/chunkProcessor";
+import { buildGraph } from "../parser/builder";
 import path from "path";
 import os from "os";
 type AnalyzeJobData = {
@@ -161,8 +162,20 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             }
         );
 
-        await updateProgress(job, 75, "parsing complete");
-        // Placeholder result for now — replaced when those layers are built
+        await updateProgress(job, 75, "building graph");
+
+        // ── Step 9: Build graph ───────────────────────────────────────────────
+        const { graphData, fileGraph } = buildGraph({
+            owner,
+            repo,
+            commitSha: metadata.commitSha,
+            fileNodes,
+            importEdges,
+            allFunctions,
+        });
+
+        await updateProgress(job, 90, "graph built");
+
         const result = {
             success: true,
             owner,
@@ -170,14 +183,12 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             commitSha: metadata.commitSha,
             defaultBranch: metadata.defaultBranch,
             sizeMb: metadata.sizeMB,
-            stats: {
-                totalFiles: fileNodes.length,
-                totalFunctions: allFunctions.length,
-                totalImportEdges: importEdges.length,
-            },
+            stats: graphData.stats,
             // These will be real R2 URLs once Layer 7 (storage) is built
             fileGraphUrl: null,
             functionsBaseUrl: null,
+            // Inline for now so the completed handler + status route can inspect it
+            _inlineFileGraph: fileGraph,
         };
 
         // ── Cache the result so same SHA is never reprocessed ─────────────────
@@ -211,7 +222,23 @@ analysisWorker.on("active", (job) => {
 
 analysisWorker.on("completed", (job, result) => {
     console.log(`[worker] Job completed: ${job.id}`);
-    console.log(`[worker] Result:`, JSON.stringify(result, null, 2));
+    console.log(`[worker] Stats:`, JSON.stringify((result as any).stats, null, 2));
+
+    // ── TEMP DEBUG — remove after verifying graph data ──────────────────────
+    const graph = (result as any)._inlineFileGraph;
+    if (graph) {
+        console.log(`[worker] Sample import edges (first 3):`);
+        graph.importEdges?.slice(0, 3).forEach((e: any) => {
+            console.log(`  ${e.source} → ${e.target} [${e.kind}] isTypeOnly=${e.isTypeOnly}`);
+        });
+        console.log(`[worker] Sample files (first 3):`);
+        graph.files?.slice(0, 3).forEach((f: any) => {
+            console.log(`  ${f.id} | kind=${f.kind} | entry=${f.isEntryPoint} | lines=${f.lineCount}`);
+        });
+    } else {
+        console.log(`[worker] No _inlineFileGraph in result — graph may not be wired yet`);
+    }
+    // ── END TEMP DEBUG ───────────────────────────────────────────────────────
 });
 
 analysisWorker.on("failed", (job, err) => {

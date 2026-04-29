@@ -15,12 +15,14 @@ export interface FileLevelResult {
     language: Language;
     rawImports: RawImport[];       // before resolution
     externalImports: string[];     // node_modules imports
+    unresolvedImports: string[];   // relative imports that couldn't be resolved on disk
 }
 
 export interface RawImport {
     specifier: string;             // raw string e.g. "./utils" or "react"
     kind: "static" | "dynamic" | "re-export";
     symbols: string[];
+    isTypeOnly: boolean;           // true for: import type { Foo } from '...'
 }
 
 // ── Language detection ──────────────────────────────────────────────────────
@@ -75,6 +77,7 @@ export function extractFileLevel(
             specifier,
             kind: "static",
             symbols,
+            isTypeOnly: decl.isTypeOnly(),
         });
     }
 
@@ -97,6 +100,7 @@ export function extractFileLevel(
             specifier,
             kind: "re-export",
             symbols,
+            isTypeOnly: decl.isTypeOnly(),
         });
     }
 
@@ -128,6 +132,7 @@ export function extractFileLevel(
                 specifier,
                 kind: "dynamic",
                 symbols: [],
+                isTypeOnly: false,
             });
         }
     });
@@ -156,5 +161,6 @@ export function extractFileLevel(
         language,
         rawImports: internalRawImports,
         externalImports: [...new Set(externalImports)],
+        unresolvedImports: [], // filled in by chunkProcessor after resolver runs
     };
 }
