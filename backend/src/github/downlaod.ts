@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { pipeline } from "stream/promises";
 import { Readable } from "stream";
-import tar from "tar";
+import * as tar from "tar";
 import { config } from "../config/config";
 
 const TMP_BASE = "/tmp/codemap";

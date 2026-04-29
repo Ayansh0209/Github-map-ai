@@ -4,14 +4,15 @@
   "main": "index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "worker": "ts-node-dev --respawn --transpile-only src/worker.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@octokit/rest": "^22.0.1",
+    "@octokit/rest": "^18.12.0",
     "@upstash/redis": "^1.37.0",
     "bullmq": "^5.73.3",
     "cors": "^2.8.6",

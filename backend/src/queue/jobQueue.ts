@@ -27,7 +27,7 @@ redisConnection.on("error", (err: any) => {
 });
 
 redisConnection.on("connect", () => {
-    console.log("[redis] connected to Railway Redis");
+    console.log(`[redis] connected to ${config.redis.url}`);
 });
 
 export const jobQueue = new Queue("repo-analysis", {
