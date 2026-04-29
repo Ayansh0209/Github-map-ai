@@ -11,7 +11,9 @@ import {
     cleanup,
 } from "../github/downlaod";
 import { decideParsing } from "../processing/parseDecider";
-
+import { processAllFiles } from "../parser/chunkProcessor";
+import path from "path";
+import os from "os";
 type AnalyzeJobData = {
     repoUrl: string;
     owner: string;
@@ -142,9 +144,24 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             );
         }
 
-        await updateProgress(job, 50, "parsing complete");
-
         // ── Steps 8-10 added in Layer 5 (ts-morph) and Layer 6 (graph builder)
+        // ── Step 8: Parse all files with ts-morph ────────────────────────────────
+        await updateProgress(job, 50, "parsing files");
+
+        // repoRoot is the extracted folder — needed for import resolution
+        const repoRoot = path.join(os.tmpdir(), "codemap", jobId);
+
+        const { fileNodes, importEdges, allFunctions } = await processAllFiles(
+            decisions,
+            repoRoot,
+            (done, total) => {
+                // map 50→75% progress across parsing
+                const percent = 50 + Math.floor((done / total) * 25);
+                job.updateProgress(percent);
+            }
+        );
+
+        await updateProgress(job, 75, "parsing complete");
         // Placeholder result for now — replaced when those layers are built
         const result = {
             success: true,
@@ -154,12 +171,9 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             defaultBranch: metadata.defaultBranch,
             sizeMb: metadata.sizeMB,
             stats: {
-                totalFiles: stats.total,
-                parseableFiles: parseableCount,
-                fullParse: stats.full,
-                importsOnly: stats.importsOnly,
-                skipped: stats.skipped,
-                filtered: stats.filtered,
+                totalFiles: fileNodes.length,
+                totalFunctions: allFunctions.length,
+                totalImportEdges: importEdges.length,
             },
             // These will be real R2 URLs once Layer 7 (storage) is built
             fileGraphUrl: null,

@@ -5,7 +5,8 @@ import { Readable } from "stream";
 import * as tar from "tar";
 import { config } from "../config/config";
 
-const TMP_BASE = "/tmp/codemap";
+import os from "os";
+const TMP_BASE = path.join(os.tmpdir(), "codemap");
 const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max download time
 
 // ── Helpers ─────────────────────────────────────────────
