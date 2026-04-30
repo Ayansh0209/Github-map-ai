@@ -97,21 +97,53 @@ function extractFromArrowOrExpression(
     node: ArrowFunction | FunctionExpression,
     relativePath: string
 ): FunctionNode | null {
-    // arrow functions need a variable declaration parent to get a name
-    // const foo = () => {}  →  name = "foo"
-    const parent = node.getParent();
-
+    // Walk up the parent chain to find a name for this function.
+    // Handles: const foo = () => {}
+    //          { foo: function() {} }
+    //          exports.foo = () => {}
+    //          module.exports.foo = function() {}
     let name: string | undefined;
+    let current: Node | undefined = node.getParent();
 
-    if (parent?.getKind() === SyntaxKind.VariableDeclaration) {
-        const varName = (parent as any).getName?.();
-        if (typeof varName === "string") name = varName;
-    }
+    while (current) {
+        const kind = current.getKind();
 
-    // property assignment: const obj = { foo: () => {} }
-    if (parent?.getKind() === SyntaxKind.PropertyAssignment) {
-        const propName = (parent as any).getName?.();
-        if (typeof propName === "string") name = propName;
+        // const foo = () => {}
+        if (kind === SyntaxKind.VariableDeclaration) {
+            const varName = (current as any).getName?.();
+            if (typeof varName === "string") name = varName;
+            break;
+        }
+
+        // { foo: () => {} } inside object literal
+        if (kind === SyntaxKind.PropertyAssignment) {
+            const propName = (current as any).getName?.();
+            if (typeof propName === "string") name = propName;
+            break;
+        }
+
+        // exports.foo = () => {} or module.exports.foo = () => {}
+        if (kind === SyntaxKind.BinaryExpression) {
+            const leftText = (current as any).getLeft?.()?.getText?.() ?? "";
+            const match = leftText.match(/^(?:module\.)?exports\.([\w$]+)$/);
+            if (match) {
+                name = match[1];
+                break;
+            }
+        }
+
+        // Stop at function/block boundaries — don't walk outside the function scope
+        if (
+            kind === SyntaxKind.FunctionDeclaration ||
+            kind === SyntaxKind.ArrowFunction ||
+            kind === SyntaxKind.FunctionExpression ||
+            kind === SyntaxKind.MethodDeclaration ||
+            kind === SyntaxKind.SourceFile
+        ) {
+            break;
+        }
+
+        current = current.getParent();
     }
 
     if (!name) return null; // truly anonymous — skip
@@ -164,6 +196,96 @@ function extractFromMethod(
     };
 }
 
+// ── CommonJS exports extractor ───────────────────────────────────────────────
+// Handles:
+//   module.exports = function foo() {}
+//   module.exports = { foo: function() {} }
+//   exports.foo = function() {}
+//   module.exports.foo = function() {}
+
+const EXPORTS_LEFT_RE = /^(?:module\.)?exports(?:\.([\w$]+))?$/;
+
+function extractFromCommonJS(
+    sourceFile: SourceFile,
+    relativePath: string
+): FunctionNode[] {
+    const results: FunctionNode[] = [];
+
+    sourceFile
+        .getDescendantsOfKind(SyntaxKind.BinaryExpression)
+        .forEach((binExpr) => {
+            // Only handle assignment expressions
+            if (binExpr.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) return;
+
+            const leftText = binExpr.getLeft().getText().trim();
+            const match = leftText.match(EXPORTS_LEFT_RE);
+            if (!match) return;
+
+            const right = binExpr.getRight();
+            const rightKind = right.getKind();
+
+            // module.exports = function foo() {} or exports.foo = function() {}
+            if (
+                rightKind === SyntaxKind.FunctionExpression ||
+                rightKind === SyntaxKind.ArrowFunction
+            ) {
+                // Try to get name from: 1) function's own name, 2) left side property
+                let name: string | undefined;
+                if (rightKind === SyntaxKind.FunctionExpression) {
+                    name = (right as FunctionExpression).getName();
+                }
+                if (!name) name = match[1]; // exports.foo → "foo"
+                if (!name) return; // module.exports = function() {} — anonymous, skip
+
+                results.push({
+                    id: makeFunctionId(relativePath, name),
+                    name,
+                    filePath: relativePath,
+                    startLine: right.getStartLineNumber(),
+                    endLine: right.getEndLineNumber(),
+                    isExported: true,
+                    kind: rightKind === SyntaxKind.ArrowFunction ? "arrow" : "function",
+                    calls: extractCallNames(right),
+                    calledBy: [],
+                    analysisConfidence: "high",
+                });
+                return;
+            }
+
+            // module.exports = { foo: function() {}, bar: () => {} }
+            if (rightKind === SyntaxKind.ObjectLiteralExpression) {
+                right.getDescendantsOfKind(SyntaxKind.PropertyAssignment).forEach((prop) => {
+                    const propName = prop.getName();
+                    if (!propName) return;
+
+                    const init = prop.getInitializer();
+                    if (!init) return;
+                    const initKind = init.getKind();
+
+                    if (
+                        initKind === SyntaxKind.FunctionExpression ||
+                        initKind === SyntaxKind.ArrowFunction
+                    ) {
+                        results.push({
+                            id: makeFunctionId(relativePath, propName),
+                            name: propName,
+                            filePath: relativePath,
+                            startLine: init.getStartLineNumber(),
+                            endLine: init.getEndLineNumber(),
+                            isExported: true,
+                            kind: initKind === SyntaxKind.ArrowFunction ? "arrow" : "function",
+                            calls: extractCallNames(init),
+                            calledBy: [],
+                            analysisConfidence: "high",
+                        });
+                    }
+                });
+            }
+        });
+
+    return results;
+}
+
 // ── Main extractor ───────────────────────────────────────────────────────────
 
 export function extractFunctionLevel(
@@ -207,6 +329,11 @@ export function extractFunctionLevel(
         .forEach((node) => {
             addIfUnique(extractFromMethod(node, relativePath));
         });
+
+    // 5. CommonJS: module.exports / exports.foo patterns
+    extractFromCommonJS(sourceFile, relativePath).forEach((fn) => {
+        addIfUnique(fn);
+    });
 
     return functions;
 }

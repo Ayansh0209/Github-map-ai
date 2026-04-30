@@ -77,40 +77,46 @@ export default function GraphControls({
       </div>
 
       {/* View toggle */}
-      <div
-        className="flex rounded-lg overflow-hidden"
-        style={{ border: "1px solid #30363d" }}
-      >
-        <button
-          id="view-file-graph-btn"
-          onClick={() => onViewChange("file-graph")}
-          className="px-3 py-1.5 text-xs font-medium transition-colors"
-          style={{
-            background: view === "file-graph" ? "#1f6feb" : "#161b22",
-            color: view === "file-graph" ? "#fff" : "#8b949e",
-          }}
+      <div className="flex flex-col gap-1">
+        <div
+          className="flex rounded-lg overflow-hidden"
+          style={{ border: "1px solid #30363d" }}
         >
-          File Graph
-        </button>
-        <button
-          id="view-function-graph-btn"
-          onClick={() => hasFunctionSelected && onViewChange("function-graph")}
-          className="px-3 py-1.5 text-xs font-medium transition-colors"
-          style={{
-            background:
-              view === "function-graph" ? "#1f6feb" : "#161b22",
-            color: view === "function-graph" ? "#fff" : "#8b949e",
-            opacity: hasFunctionSelected ? 1 : 0.4,
-            cursor: hasFunctionSelected ? "pointer" : "not-allowed",
-          }}
-          title={
-            hasFunctionSelected
-              ? "Switch to function graph"
-              : "Select a function first"
-          }
-        >
-          Function Graph
-        </button>
+          <button
+            id="view-file-graph-btn"
+            onClick={() => onViewChange("file-graph")}
+            className="px-3 py-1.5 text-xs font-medium transition-colors"
+            style={{
+              background: view === "file-graph" ? "#1f6feb" : "#161b22",
+              color: view === "file-graph" ? "#fff" : "#8b949e",
+            }}
+          >
+            File Graph
+          </button>
+          <button
+            id="view-function-graph-btn"
+            onClick={() => hasFunctionSelected && onViewChange("function-graph")}
+            className="px-3 py-1.5 text-xs font-medium transition-colors"
+            style={{
+              background:
+                view === "function-graph" ? "#1f6feb" : "#161b22",
+              color: view === "function-graph" ? "#fff" : hasFunctionSelected ? "#8b949e" : "#484f58",
+              cursor: hasFunctionSelected ? "pointer" : "not-allowed",
+            }}
+            title={
+              hasFunctionSelected
+                ? "Switch to function graph"
+                : "Click a file → then click a function in the panel to activate"
+            }
+          >
+            Function Graph
+          </button>
+        </div>
+        {!hasFunctionSelected && (
+          <span className="text-[10px] pl-1" style={{ color: "#484f58" }}>
+            ↑ Click a file → click a function to unlock
+          </span>
+        )}
       </div>
 
       {/* Reset */}

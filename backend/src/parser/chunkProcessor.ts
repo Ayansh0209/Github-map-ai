@@ -175,6 +175,14 @@ async function processChunk(
                     ? extractFunctionLevel(sourceFile, decision.relativePath)
                     : [];
 
+            // Debug: warn if a JS file in full-parse mode produced 0 functions
+            if (decision.mode === "full" && functions.length === 0) {
+                const ext = path.extname(decision.relativePath);
+                if (ext === ".js" || ext === ".jsx") {
+                    console.log(`[chunkProcessor] ⚠ 0 functions in JS file: ${decision.relativePath}`);
+                }
+            }
+
             allFunctions.push(...functions);
 
             // ── Build FileNode ────────────────────────────────────────────

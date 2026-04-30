@@ -127,12 +127,26 @@ export default function DetailsPanel({
         <section>
           <SectionHeader>Functions ({functions.length})</SectionHeader>
 
-          {file.parseStatus === "imports-only" ? (
+          {!functionFiles ? (
+            <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#0d1117", border: "1px dashed #30363d" }}>
+              <div style={{ color: "#f0883e", fontWeight: 600 }}>⚠ Function data not available</div>
+              <div style={{ color: "#8b949e" }}>
+                Re-analyze the repo to get function-level data. If this is a JavaScript-only repo, function analysis may be limited.
+              </div>
+            </div>
+          ) : file.parseStatus === "imports-only" ? (
             <EmptyMessage>
               Function data unavailable — file was too large for full parse
             </EmptyMessage>
           ) : functions.length === 0 ? (
-            <EmptyMessage>No functions detected</EmptyMessage>
+            <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#0d1117", border: "1px dashed #30363d" }}>
+              <div style={{ color: "#8b949e" }}>No functions detected in this file.</div>
+              <div style={{ color: "#484f58" }}>
+                {file.language === "javascript"
+                  ? "JavaScript files have limited function analysis. Try a TypeScript repo for full call graphs."
+                  : "This file may contain no exported functions, or parsing was skipped."}
+              </div>
+            </div>
           ) : (
             <div
               className="space-y-1 overflow-y-auto pr-1"

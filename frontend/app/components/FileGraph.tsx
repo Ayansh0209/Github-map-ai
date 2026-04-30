@@ -46,13 +46,23 @@ export default function FileGraph({
   selectedFileId,
 }: FileGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
   const simulationRef = useRef<d3.Simulation<SimNode, SimLink> | null>(null);
   const initializedRef = useRef(false);
-  // Store refs for search/selection updates without rebuilding
+  // Always-current callback refs — avoids stale closures in D3 handlers
+  const onFileClickRef = useRef(onFileClick);
+  const selectedFileIdRef = useRef(selectedFileId);
+  // D3 selection refs for search/selection updates without rebuilding the graph
   const nodeGRef = useRef<d3.Selection<SVGGElement, SimNode, SVGGElement, unknown> | null>(null);
   const linkRef = useRef<d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown> | null>(null);
   const labelRef = useRef<d3.Selection<SVGTextElement, SimNode, SVGGElement, unknown> | null>(null);
+
+  // Keep refs in sync with latest props — so D3 handlers always use current values
+  useEffect(() => {
+    onFileClickRef.current = onFileClick;
+  }, [onFileClick]);
+  useEffect(() => {
+    selectedFileIdRef.current = selectedFileId;
+  }, [selectedFileId]);
 
   const buildGraph = useCallback(() => {
     if (!containerRef.current || files.length === 0) return;
@@ -60,14 +70,14 @@ export default function FileGraph({
     initializedRef.current = true;
 
     const container = containerRef.current;
-    const width = container.clientWidth;
-    const height = container.clientHeight;
+    const width = container.clientWidth || 800;
+    const height = container.clientHeight || 600;
 
     // Clear any existing content
     d3.select(container).selectAll("svg").remove();
     d3.select(container).selectAll(".tooltip").remove();
 
-    // Pre-compute degree for each node
+    // Pre-compute degree
     const degreeMap = new Map<string, number>();
     for (const edge of edges) {
       degreeMap.set(edge.source, (degreeMap.get(edge.source) || 0) + 1);
@@ -77,25 +87,21 @@ export default function FileGraph({
     // Build nodes
     const nodeMap = new Map<string, SimNode>();
     const nodes: SimNode[] = files.map((f) => {
-      const node: SimNode = {
+      const n: SimNode = {
         id: f.id,
         data: f,
         folder: getFolderGroup(f.id),
         degree: degreeMap.get(f.id) || 0,
       };
-      nodeMap.set(f.id, node);
-      return node;
+      nodeMap.set(f.id, n);
+      return n;
     });
 
-    // Build links — only if both source and target exist
+    // Build links — only if both endpoints exist
     const links: SimLink[] = [];
     for (const edge of edges) {
       if (nodeMap.has(edge.source) && nodeMap.has(edge.target)) {
-        links.push({
-          source: edge.source,
-          target: edge.target,
-          data: edge,
-        });
+        links.push({ source: edge.source, target: edge.target, data: edge });
       }
     }
 
@@ -107,8 +113,6 @@ export default function FileGraph({
       .attr("width", width)
       .attr("height", height)
       .attr("viewBox", [0, 0, width, height]);
-
-    svgRef.current = svg.node();
 
     // Zoom layer
     const g = svg.append("g");
@@ -128,37 +132,69 @@ export default function FileGraph({
       .select(container)
       .append("div")
       .attr("class", "tooltip")
-      .style("opacity", 0);
+      .style("opacity", 0)
+      .style("pointer-events", "none");
 
     // ── Arrow markers ─────────────────────────────────────────────────────
 
     const defs = svg.append("defs");
 
-    defs
-      .append("marker")
+    defs.append("marker")
       .attr("id", "arrow-default")
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 20)
-      .attr("refY", 0)
-      .attr("markerWidth", 6)
-      .attr("markerHeight", 6)
+      .attr("refX", 20).attr("refY", 0)
+      .attr("markerWidth", 6).attr("markerHeight", 6)
       .attr("orient", "auto")
-      .append("path")
-      .attr("d", "M0,-4L10,0L0,4")
-      .attr("fill", "#30363d");
+      .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#30363d");
 
-    defs
-      .append("marker")
+    defs.append("marker")
       .attr("id", "arrow-highlight")
       .attr("viewBox", "0 -5 10 10")
-      .attr("refX", 20)
-      .attr("refY", 0)
-      .attr("markerWidth", 6)
-      .attr("markerHeight", 6)
+      .attr("refX", 20).attr("refY", 0)
+      .attr("markerWidth", 6).attr("markerHeight", 6)
       .attr("orient", "auto")
-      .append("path")
-      .attr("d", "M0,-4L10,0L0,4")
-      .attr("fill", "#58a6ff");
+      .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#58a6ff");
+
+    // ── Build the force simulation FIRST so drag handlers can reference it ─
+
+    // Compute folder centroids for clustering
+    const folderSet = new Set(nodes.map((n) => n.folder));
+    const folderArr = [...folderSet];
+    const angleStep = (2 * Math.PI) / Math.max(folderArr.length, 1);
+    const clusterRadius = Math.min(width, height) * 0.3;
+    const folderCenters = new Map<string, { x: number; y: number }>();
+    folderArr.forEach((f, i) => {
+      folderCenters.set(f, {
+        x: width / 2 + Math.cos(i * angleStep) * clusterRadius,
+        y: height / 2 + Math.sin(i * angleStep) * clusterRadius,
+      });
+    });
+
+    function folderForce(alpha: number) {
+      for (const n of nodes) {
+        const center = folderCenters.get(n.folder);
+        if (center && n.x != null && n.y != null) {
+          n.vx = (n.vx || 0) + (center.x - n.x) * alpha * 0.08;
+          n.vy = (n.vy || 0) + (center.y - n.y) * alpha * 0.08;
+        }
+      }
+    }
+
+    const simulation = d3
+      .forceSimulation<SimNode>(nodes)
+      .force(
+        "link",
+        d3.forceLink<SimNode, SimLink>(links).id((d) => d.id).distance(80)
+      )
+      .force("charge", d3.forceManyBody().strength(-200))
+      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.05))
+      .force(
+        "collision",
+        d3.forceCollide<SimNode>().radius((d) => getNodeRadius(d.data.lineCount) + 8)
+      )
+      .force("folder", folderForce);
+
+    simulationRef.current = simulation;
 
     // ── Links ─────────────────────────────────────────────────────────────
 
@@ -176,7 +212,7 @@ export default function FileGraph({
 
     linkRef.current = link;
 
-    // ── Node groups ───────────────────────────────────────────────────────
+    // ── Node groups (drag uses simulation defined above) ───────────────────
 
     const node = g
       .append("g")
@@ -184,7 +220,6 @@ export default function FileGraph({
       .data(nodes)
       .join("g")
       .attr("class", "graph-node")
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       .call(
         d3
           .drag<SVGGElement, SimNode>()
@@ -206,7 +241,9 @@ export default function FileGraph({
 
     nodeGRef.current = node;
 
-    // Entry point ring (drawn first, behind the circle)
+    // ── Visual layers ──────────────────────────────────────────────────────
+
+    // Entry point ring
     node
       .filter((d) => d.data.isEntryPoint)
       .append("circle")
@@ -234,7 +271,7 @@ export default function FileGraph({
       })
       .attr("stroke-width", 1.5);
 
-    // Test file badge "T"
+    // Test badge "T"
     node
       .filter((d) => d.data.kind === "test")
       .append("text")
@@ -246,7 +283,7 @@ export default function FileGraph({
       .attr("pointer-events", "none")
       .text("T");
 
-    // Labels — always show for entry points and high-degree nodes
+    // Labels
     const label = node
       .append("text")
       .attr("class", "graph-label")
@@ -256,9 +293,7 @@ export default function FileGraph({
       .attr("font-family", "var(--font-geist-mono), monospace")
       .attr("font-size", "10px")
       .attr("pointer-events", "none")
-      .attr("opacity", (d) =>
-        d.data.isEntryPoint || d.degree >= 3 ? 1 : 0
-      )
+      .attr("opacity", (d) => (d.data.isEntryPoint || d.degree >= 3 ? 1 : 0))
       .text((d) => d.data.label);
 
     labelRef.current = label;
@@ -267,10 +302,8 @@ export default function FileGraph({
 
     node
       .on("mouseover", function (event, d) {
-        // Show label on hover
         d3.select(this).select("text.graph-label").attr("opacity", 1);
 
-        // Show tooltip
         tooltip
           .style("opacity", 1)
           .html(
@@ -282,9 +315,8 @@ export default function FileGraph({
           .style("left", event.offsetX + 14 + "px")
           .style("top", event.offsetY - 14 + "px");
 
-        // Highlight connected nodes + edges, dim everything else
-        const connectedIds = new Set<string>();
-        connectedIds.add(d.id);
+        // Highlight connected
+        const connectedIds = new Set<string>([d.id]);
         links.forEach((l) => {
           const sId = (l.source as SimNode).id;
           const tId = (l.target as SimNode).id;
@@ -307,20 +339,14 @@ export default function FileGraph({
           .attr("marker-end", (l) => {
             const s = (l.source as SimNode).id;
             const t = (l.target as SimNode).id;
-            return s === d.id || t === d.id
-              ? "url(#arrow-highlight)"
-              : "url(#arrow-default)";
+            return s === d.id || t === d.id ? "url(#arrow-highlight)" : "url(#arrow-default)";
           });
       })
       .on("mouseout", function (_event, d) {
-        // Hide label if not always-visible
         if (!d.data.isEntryPoint && d.degree < 3) {
           d3.select(this).select("text.graph-label").attr("opacity", 0);
         }
-
         tooltip.style("opacity", 0);
-
-        // Reset
         node.attr("opacity", 1);
         link
           .attr("stroke", "#30363d")
@@ -328,64 +354,21 @@ export default function FileGraph({
           .attr("marker-end", "url(#arrow-default)");
       })
       .on("click", (_event, d) => {
-        onFileClick(d.data);
+        // Use ref so this is never stale even if prop changes
+        onFileClickRef.current(d.data);
       });
 
-    // ── Force simulation ──────────────────────────────────────────────────
+    // ── Tick ──────────────────────────────────────────────────────────────
 
-    // Compute folder centroids for clustering
-    const folderSet = new Set(nodes.map((n) => n.folder));
-    const folderCenters = new Map<string, { x: number; y: number }>();
-    const folderArr = [...folderSet];
-    const angleStep = (2 * Math.PI) / Math.max(folderArr.length, 1);
-    const clusterRadius = Math.min(width, height) * 0.3;
-    folderArr.forEach((f, i) => {
-      folderCenters.set(f, {
-        x: width / 2 + Math.cos(i * angleStep) * clusterRadius,
-        y: height / 2 + Math.sin(i * angleStep) * clusterRadius,
-      });
+    simulation.on("tick", () => {
+      link
+        .attr("x1", (d) => (d.source as SimNode).x!)
+        .attr("y1", (d) => (d.source as SimNode).y!)
+        .attr("x2", (d) => (d.target as SimNode).x!)
+        .attr("y2", (d) => (d.target as SimNode).y!);
+
+      node.attr("transform", (d) => `translate(${d.x},${d.y})`);
     });
-
-    // Custom folder clustering force
-    function folderForce(alpha: number) {
-      for (const n of nodes) {
-        const center = folderCenters.get(n.folder);
-        if (center && n.x != null && n.y != null) {
-          n.vx = (n.vx || 0) + (center.x - n.x) * alpha * 0.08;
-          n.vy = (n.vy || 0) + (center.y - n.y) * alpha * 0.08;
-        }
-      }
-    }
-
-    const simulation = d3
-      .forceSimulation<SimNode>(nodes)
-      .force(
-        "link",
-        d3
-          .forceLink<SimNode, SimLink>(links)
-          .id((d) => d.id)
-          .distance(80)
-      )
-      .force("charge", d3.forceManyBody().strength(-200))
-      .force("center", d3.forceCenter(width / 2, height / 2).strength(0.05))
-      .force(
-        "collision",
-        d3
-          .forceCollide<SimNode>()
-          .radius((d) => getNodeRadius(d.data.lineCount) + 8)
-      )
-      .force("folder", folderForce)
-      .on("tick", () => {
-        link
-          .attr("x1", (d) => (d.source as SimNode).x!)
-          .attr("y1", (d) => (d.source as SimNode).y!)
-          .attr("x2", (d) => (d.target as SimNode).x!)
-          .attr("y2", (d) => (d.target as SimNode).y!);
-
-        node.attr("transform", (d) => `translate(${d.x},${d.y})`);
-      });
-
-    simulationRef.current = simulation;
 
     // Auto-fit after simulation settles
     simulation.on("end", () => {
@@ -396,23 +379,21 @@ export default function FileGraph({
         const cx = bounds.x + dx / 2;
         const cy = bounds.y + dy / 2;
         const scale = 0.85 / Math.max(dx / width, dy / height);
-        const translate: [number, number] = [
-          width / 2 - cx * scale,
-          height / 2 - cy * scale,
-        ];
+        const tx = width / 2 - cx * scale;
+        const ty = height / 2 - cy * scale;
         svg
           .transition()
           .duration(750)
           .call(
             zoom.transform,
-            d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+            d3.zoomIdentity.translate(tx, ty).scale(scale)
           );
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [files, edges]);
 
-  // ── Search filter effect ────────────────────────────────────────────────
+  // ── Search filter ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!nodeGRef.current || !linkRef.current) return;
     const q = searchQuery.toLowerCase().trim();
@@ -422,7 +403,6 @@ export default function FileGraph({
       linkRef.current.attr("stroke-opacity", (d: SimLink) =>
         d.data.isTypeOnly ? 0.15 : 0.3
       );
-      // Reset labels
       if (labelRef.current) {
         labelRef.current.attr("opacity", (d: SimNode) =>
           d.data.isEntryPoint || d.degree >= 3 ? 1 : 0
@@ -432,41 +412,45 @@ export default function FileGraph({
     }
 
     nodeGRef.current.attr("opacity", (d: SimNode) =>
-      d.data.label.toLowerCase().includes(q) ||
-      d.data.path.toLowerCase().includes(q)
+      d.data.label.toLowerCase().includes(q) || d.data.path.toLowerCase().includes(q)
         ? 1
         : 0.08
     );
-
-    // Show labels for matches
     if (labelRef.current) {
       labelRef.current.attr("opacity", (d: SimNode) =>
-        d.data.label.toLowerCase().includes(q) ||
-        d.data.path.toLowerCase().includes(q)
+        d.data.label.toLowerCase().includes(q) || d.data.path.toLowerCase().includes(q)
           ? 1
           : 0
       );
     }
-
-    linkRef.current.attr("stroke-opacity", 0.05);
+    linkRef.current.attr("stroke-opacity", 0.04);
   }, [searchQuery]);
 
-  // ── Selected file highlight ─────────────────────────────────────────────
+  // ── Selected file highlight ──────────────────────────────────────────────
   useEffect(() => {
     if (!nodeGRef.current) return;
-
-    nodeGRef.current.select("circle:nth-child(2)").attr("stroke", (d: SimNode) => {
-      if (d.id === selectedFileId) return "#f0883e";
-      if (d.data.kind === "test") return "#22c55e";
-      if (d.data.kind === "config") return "#f59e0b";
-      return "rgba(255,255,255,0.1)";
-    }).attr("stroke-width", (d: SimNode) => (d.id === selectedFileId ? 3 : 1.5));
+    // Select the main fill circle (first or second child depending on entry point ring)
+    nodeGRef.current.selectAll<SVGCircleElement, SimNode>("circle").attr(
+      "stroke",
+      function (this: SVGCircleElement, d: SimNode) {
+        // Only target the filled circle (not the entry ring — which has fill="none")
+        const isFillCircle = d3.select(this).attr("fill") !== "none";
+        if (!isFillCircle) return d3.select(this).attr("stroke"); // leave ring unchanged
+        if (d.id === selectedFileIdRef.current) return "#f0883e";
+        if (d.data.kind === "test") return "#22c55e";
+        if (d.data.kind === "config") return "#f59e0b";
+        return "rgba(255,255,255,0.1)";
+      }
+    ).attr("stroke-width", function (this: SVGCircleElement, d: SimNode) {
+      const isFillCircle = d3.select(this).attr("fill") !== "none";
+      if (!isFillCircle) return d3.select(this).attr("stroke-width");
+      return d.id === selectedFileIdRef.current ? 2.5 : 1.5;
+    });
   }, [selectedFileId]);
 
-  // ── Mount / unmount ─────────────────────────────────────────────────────
+  // ── Mount / unmount ──────────────────────────────────────────────────────
   useEffect(() => {
     buildGraph();
-
     return () => {
       simulationRef.current?.stop();
       initializedRef.current = false;
@@ -478,74 +462,57 @@ export default function FileGraph({
       {/* Legend */}
       <div
         className="absolute bottom-4 left-4 z-10 border rounded-xl p-3 text-xs space-y-1.5"
-        style={{ background: "rgba(13,17,23,0.9)", borderColor: "#30363d" }}
+        style={{
+          background: "rgba(13,17,23,0.92)",
+          borderColor: "#30363d",
+          pointerEvents: "none",
+        }}
       >
-        <div className="font-medium mb-2" style={{ color: "#8b949e" }}>
-          Legend
-        </div>
+        <div className="font-medium mb-2" style={{ color: "#8b949e" }}>Legend</div>
+        {[
+          { color: "#3178c6", label: "TypeScript" },
+          { color: "#f7df1e", label: "JavaScript", dark: true },
+          { color: "#7c3aed", label: "TSX" },
+          { color: "#ea580c", label: "JSX" },
+        ].map(({ color, label, dark }) => (
+          <div key={label} className="flex items-center gap-2">
+            <span
+              className="w-3 h-3 rounded-full"
+              style={{
+                background: color,
+                border: dark ? "1px solid #8b7a00" : undefined,
+              }}
+            />
+            <span style={{ color: "#e6edf3" }}>{label}</span>
+          </div>
+        ))}
         <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full"
-            style={{ background: "#3178c6" }}
-          />
-          <span style={{ color: "#e6edf3" }}>TypeScript</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full border"
-            style={{ background: "#f7df1e", borderColor: "#8b7a00" }}
-          />
-          <span style={{ color: "#e6edf3" }}>JavaScript</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full"
-            style={{ background: "#7c3aed" }}
-          />
-          <span style={{ color: "#e6edf3" }}>TSX</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full"
-            style={{ background: "#ea580c" }}
-          />
-          <span style={{ color: "#e6edf3" }}>JSX</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full border"
-            style={{ borderColor: "#22c55e", background: "transparent" }}
-          />
+          <span className="w-3 h-3 rounded-full border" style={{ borderColor: "#22c55e", background: "transparent" }} />
           <span style={{ color: "#e6edf3" }}>Test file</span>
         </div>
         <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full border border-dashed"
-            style={{ borderColor: "#22c55e", background: "transparent" }}
-          />
+          <span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e", background: "transparent" }} />
           <span style={{ color: "#e6edf3" }}>Entry point</span>
         </div>
-        <div className="mt-2" style={{ color: "#8b949e" }}>
-          Node size = line count
-        </div>
-        <div style={{ color: "#8b949e" }}>Click file → see functions</div>
+        <div className="mt-2 text-[10px]" style={{ color: "#484f58" }}>Node size = line count</div>
+        <div className="text-[10px]" style={{ color: "#484f58" }}>Click file → see functions</div>
       </div>
 
-      {/* Stats overlay */}
+      {/* Stats */}
       <div
         className="absolute top-4 right-4 z-10 rounded-xl p-3 text-xs space-y-1"
-        style={{ background: "rgba(13,17,23,0.9)", borderColor: "#30363d", border: "1px solid #30363d" }}
+        style={{
+          background: "rgba(13,17,23,0.92)",
+          border: "1px solid #30363d",
+          pointerEvents: "none",
+        }}
       >
-        <div className="font-medium" style={{ color: "#e6edf3" }}>
-          {owner}/{repo}
-        </div>
-        <div style={{ color: "#8b949e" }}>
-          {files.length} files · {edges.length} edges
-        </div>
+        <div className="font-medium" style={{ color: "#e6edf3" }}>{owner}/{repo}</div>
+        <div style={{ color: "#8b949e" }}>{files.length} files · {edges.length} edges</div>
         <div style={{ color: "#484f58" }}>Scroll to zoom · Drag to pan</div>
       </div>
 
-      {/* Graph container */}
+      {/* Graph canvas — must be last so overlays don't intercept graph clicks */}
       <div
         ref={containerRef}
         className="graph-container w-full h-full rounded-2xl overflow-hidden"
