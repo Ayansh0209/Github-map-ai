@@ -4,10 +4,18 @@ import { useState, useCallback } from "react";
 import InputBar from "./components/InputBar";
 import ProgressBar from "./components/ProgressBar";
 import FileGraph from "./components/FileGraph";
+import FunctionGraph from "./components/FunctionGraph";
 import DetailsPanel from "./components/DetailsPanel";
 import StatsBar from "./components/StatsBar";
+import GraphControls from "./components/GraphControls";
 import { useJobPolling } from "./hooks/useJobPolling";
-import { submitAnalysis, FileNodeDTO } from "./lib/client";
+import { submitAnalysis } from "./lib/client";
+import type {
+  FileNodeDTO,
+  FunctionNodeDTO,
+  FunctionFilePayload,
+  ViewMode,
+} from "./lib/types";
 
 export default function Home() {
   const {
@@ -23,20 +31,43 @@ export default function Home() {
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<FileNodeDTO | null>(null);
+  const [selectedFunction, setSelectedFunction] =
+    useState<FunctionNodeDTO | null>(null);
+  const [view, setView] = useState<ViewMode>("file-graph");
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const isLoading = status === "submitting" || status === "processing" || status === "queued" || status === "delayed";
+  const isLoading =
+    status === "submitting" ||
+    status === "processing" ||
+    status === "queued" ||
+    status === "delayed";
   const isDone = status === "done" && result?._inlineFileGraph;
+
+  // Extract data from result
+  const fileGraph = result?._inlineFileGraph ?? null;
+  const functionFiles: Record<string, FunctionFilePayload> | null =
+    result?._functionFiles ?? null;
+  const owner = result?.owner ?? "";
+  const repo = result?.repo ?? "";
+  const commitSha = result?.commitSha ?? "";
+
+  // ── Handlers ────────────────────────────────────────────────────────────
 
   const handleSubmit = useCallback(
     async (repoUrl: string) => {
       setSubmitError(null);
       setSelectedFile(null);
+      setSelectedFunction(null);
+      setView("file-graph");
+      setSearchQuery("");
 
       try {
         const { jobId } = await submitAnalysis(repoUrl);
         startPolling(jobId);
       } catch (err) {
-        setSubmitError(err instanceof Error ? err.message : "Failed to submit");
+        setSubmitError(
+          err instanceof Error ? err.message : "Failed to submit"
+        );
       }
     },
     [startPolling]
@@ -48,12 +79,54 @@ export default function Home() {
 
   const handleFileNavigate = useCallback(
     (fileId: string) => {
-      if (!result?._inlineFileGraph) return;
-      const file = result._inlineFileGraph.files.find((f) => f.id === fileId);
+      if (!fileGraph) return;
+      const file = fileGraph.files.find((f) => f.id === fileId);
       if (file) setSelectedFile(file);
     },
-    [result]
+    [fileGraph]
   );
+
+  const handleFunctionClick = useCallback(
+    (fn: FunctionNodeDTO) => {
+      setSelectedFunction(fn);
+      setView("function-graph");
+    },
+    []
+  );
+
+  const handleFunctionNavigate = useCallback(
+    (fn: FunctionNodeDTO) => {
+      setSelectedFunction(fn);
+      // Stay in function-graph view
+    },
+    []
+  );
+
+  const handleBackToFileGraph = useCallback(() => {
+    setView("file-graph");
+    setSelectedFunction(null);
+  }, []);
+
+  const handleViewChange = useCallback(
+    (newView: ViewMode) => {
+      if (newView === "function-graph" && !selectedFunction) return;
+      setView(newView);
+    },
+    [selectedFunction]
+  );
+
+  const handleResetView = useCallback(() => {
+    setSearchQuery("");
+    // Force graph re-render by toggling a key (handled by FileGraph internally)
+  }, []);
+
+  const handleReset = useCallback(() => {
+    reset();
+    setSelectedFile(null);
+    setSelectedFunction(null);
+    setView("file-graph");
+    setSearchQuery("");
+  }, [reset]);
 
   return (
     <div className="flex flex-col min-h-screen gradient-bg">
@@ -63,7 +136,14 @@ export default function Home() {
         <div className="flex items-center gap-3 mb-6 animate-float">
           <div className="relative">
             <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-primary to-accent flex items-center justify-center">
-              <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="white"
+                strokeWidth="2"
+              >
                 <circle cx="12" cy="12" r="3" />
                 <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83" />
               </svg>
@@ -79,10 +159,12 @@ export default function Home() {
 
         {/* Tagline */}
         <p className="text-muted text-center text-lg max-w-xl mb-2">
-          Paste a GitHub URL. Get an interactive visual map of the entire codebase.
+          Paste a GitHub URL. Get an interactive visual map of the entire
+          codebase.
         </p>
         <p className="text-muted/60 text-center text-sm max-w-md mb-10">
-          File dependencies · Function calls · Architecture — all deterministic, no AI guessing.
+          File dependencies · Function calls · Architecture — all
+          deterministic, no AI guessing.
         </p>
 
         {/* Input */}
@@ -93,7 +175,9 @@ export default function Home() {
         />
 
         {/* Progress */}
-        {(status === "processing" || status === "queued" || status === "delayed") && (
+        {(status === "processing" ||
+          status === "queued" ||
+          status === "delayed") && (
           <ProgressBar
             progress={progress}
             step={step}
@@ -114,7 +198,14 @@ export default function Home() {
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <FeatureCard
               icon={
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                >
                   <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                   <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
                 </svg>
@@ -124,7 +215,14 @@ export default function Home() {
             />
             <FeatureCard
               icon={
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                >
                   <path d="M8 3H5a2 2 0 00-2 2v3M21 8V5a2 2 0 00-2-2h-3M3 16v3a2 2 0 002 2h3M16 21h3a2 2 0 002-2v-3" />
                   <circle cx="12" cy="12" r="4" />
                 </svg>
@@ -134,7 +232,14 @@ export default function Home() {
             />
             <FeatureCard
               icon={
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <svg
+                  width="24"
+                  height="24"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                >
                   <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
                   <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
                 </svg>
@@ -146,7 +251,9 @@ export default function Home() {
 
           {/* How it works */}
           <div className="mt-16 text-center">
-            <h2 className="text-xl font-semibold text-foreground mb-8">How it works</h2>
+            <h2 className="text-xl font-semibold text-foreground mb-8">
+              How it works
+            </h2>
             <div className="flex flex-col md:flex-row items-center justify-center gap-6 text-sm">
               <Step num={1} text="Paste a GitHub repo URL" />
               <Arrow />
@@ -159,29 +266,81 @@ export default function Home() {
       )}
 
       {/* ── Graph Section (shown when analysis is complete) ─────────────── */}
-      {isDone && result?._inlineFileGraph && (
+      {isDone && fileGraph && (
         <section className="flex-1 px-6 pb-12">
-          <StatsBar
-            stats={result._inlineFileGraph.stats}
-            owner={result.owner!}
-            repo={result.repo!}
-          />
+          <StatsBar stats={fileGraph.stats} owner={owner} repo={repo} />
 
           <div className="max-w-[1600px] mx-auto">
-            <FileGraph
-              files={result._inlineFileGraph.files}
-              edges={result._inlineFileGraph.importEdges}
-              onFileClick={handleFileClick}
-              owner={result.owner!}
-              repo={result.repo!}
+            {/* Graph controls */}
+            <GraphControls
+              view={view}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              onViewChange={handleViewChange}
+              onResetView={handleResetView}
+              fileCount={fileGraph.files.length}
+              edgeCount={fileGraph.importEdges.length}
+              hasFunctionSelected={!!selectedFunction}
             />
+
+            {/* Conditional graph rendering */}
+            {view === "file-graph" ? (
+              <FileGraph
+                files={fileGraph.files}
+                edges={fileGraph.importEdges}
+                onFileClick={handleFileClick}
+                owner={owner}
+                repo={repo}
+                searchQuery={searchQuery}
+                selectedFileId={selectedFile?.id ?? null}
+              />
+            ) : selectedFunction && functionFiles ? (
+              <FunctionGraph
+                selectedFunction={selectedFunction}
+                functionFiles={functionFiles}
+                owner={owner}
+                repo={repo}
+                commitSha={commitSha}
+                onFunctionNavigate={handleFunctionNavigate}
+                onBackToFileGraph={handleBackToFileGraph}
+              />
+            ) : (
+              <div
+                className="flex items-center justify-center rounded-2xl"
+                style={{
+                  height: "75vh",
+                  background: "#0d1117",
+                  border: "1px solid #30363d",
+                  color: "#484f58",
+                }}
+              >
+                <div className="text-center">
+                  <p className="text-lg mb-2">No function selected</p>
+                  <p className="text-sm">
+                    Click a file in the graph, then click a function to see its
+                    call graph.
+                  </p>
+                  <button
+                    onClick={handleBackToFileGraph}
+                    className="mt-4 px-4 py-2 rounded-lg text-sm"
+                    style={{
+                      background: "#1c2128",
+                      border: "1px solid #30363d",
+                      color: "#8b949e",
+                    }}
+                  >
+                    Back to file graph
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* New analysis button */}
           <div className="text-center mt-6">
             <button
               id="new-analysis-btn"
-              onClick={reset}
+              onClick={handleReset}
               className="text-sm text-muted hover:text-foreground transition-colors underline underline-offset-4"
             >
               Analyze another repository
@@ -191,15 +350,17 @@ export default function Home() {
       )}
 
       {/* ── Details Panel (slides in on file click) ────────────────────── */}
-      {isDone && result?._inlineFileGraph && (
+      {isDone && fileGraph && (
         <DetailsPanel
           file={selectedFile}
-          edges={result._inlineFileGraph.importEdges}
-          owner={result.owner!}
-          repo={result.repo!}
-          commitSha={result.commitSha!}
+          edges={fileGraph.importEdges}
+          owner={owner}
+          repo={repo}
+          commitSha={commitSha}
+          functionFiles={functionFiles}
           onClose={() => setSelectedFile(null)}
           onFileNavigate={handleFileNavigate}
+          onFunctionClick={handleFunctionClick}
         />
       )}
 
@@ -223,10 +384,14 @@ function FeatureCard({
   description: string;
 }) {
   return (
-    <div className="group rounded-2xl border border-border bg-surface p-6 transition-all duration-300
-                    hover:border-primary/20 hover:shadow-lg hover:shadow-primary/5">
-      <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary mb-4
-                      group-hover:bg-primary/15 transition-colors">
+    <div
+      className="group rounded-2xl border border-border bg-surface p-6 transition-all duration-300
+                    hover:border-primary/20 hover:shadow-lg hover:shadow-primary/5"
+    >
+      <div
+        className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary mb-4
+                      group-hover:bg-primary/15 transition-colors"
+      >
         {icon}
       </div>
       <h3 className="text-sm font-semibold text-foreground mb-2">{title}</h3>

@@ -165,7 +165,7 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
         await updateProgress(job, 75, "building graph");
 
         // ── Step 9: Build graph ───────────────────────────────────────────────
-        const { graphData, fileGraph } = buildGraph({
+        const { graphData, fileGraph, functionFiles } = buildGraph({
             owner,
             repo,
             commitSha: metadata.commitSha,
@@ -189,6 +189,8 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             functionsBaseUrl: null,
             // Inline for now so the completed handler + status route can inspect it
             _inlineFileGraph: fileGraph,
+            // Per-file function data — Map converted to plain object for JSON serialization
+            _functionFiles: Object.fromEntries(functionFiles),
         };
 
         // ── Cache the result so same SHA is never reprocessed ─────────────────

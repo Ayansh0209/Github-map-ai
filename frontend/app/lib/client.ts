@@ -2,91 +2,21 @@
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Re-export all types from the centralized types file ───────────────────────
+export type {
+  AnalyzeResponse,
+  StatusResponse,
+  GraphStats,
+  FileGraphPayload,
+  FileNodeDTO,
+  ImportEdgeDTO,
+  FunctionNodeDTO,
+  CallEdgeDTO,
+  FunctionFilePayload,
+  ViewMode,
+} from "./types";
 
-export interface AnalyzeResponse {
-  jobId: string;
-  position: number;
-  estimatedWaitMs: number;
-}
-
-export interface StatusResponse {
-  status: "queued" | "processing" | "done" | "failed" | "delayed";
-  position?: number;
-  progress?: number;
-  step?: string;
-  error?: string;
-  // when done:
-  success?: boolean;
-  owner?: string;
-  repo?: string;
-  commitSha?: string;
-  defaultBranch?: string;
-  stats?: GraphStats;
-  _inlineFileGraph?: FileGraphPayload;
-}
-
-export interface GraphStats {
-  totalFiles: number;
-  parsedFiles: number;
-  totalFunctions: number;
-  totalImportEdges: number;
-  totalCallEdges: number;
-  testFiles: number;
-  entryPoints: number;
-}
-
-export interface FileGraphPayload {
-  repoId: string;
-  commitSha: string;
-  generatedAt: string;
-  stats: GraphStats;
-  files: FileNodeDTO[];
-  importEdges: ImportEdgeDTO[];
-}
-
-export interface FileNodeDTO {
-  id: string;
-  label: string;
-  language: string;
-  path: string;
-  sizeBytes: number;
-  lineCount: number;
-  parseStatus: string;
-  kind: string;
-  isEntryPoint: boolean;
-  externalImports: string[];
-  unresolvedImports: string[];
-}
-
-export interface ImportEdgeDTO {
-  source: string;
-  target: string;
-  kind: string;
-  symbols: string[];
-  isTypeOnly: boolean;
-}
-
-export interface FunctionNodeDTO {
-  id: string;
-  name: string;
-  filePath: string;
-  startLine: number;
-  endLine: number;
-  isExported: boolean;
-  kind: string;
-  visibility?: string;
-  parentId?: string;
-  calls: string[];
-  calledBy: string[];
-  analysisConfidence: string;
-}
-
-export interface FunctionFilePayload {
-  fileId: string;
-  functions: FunctionNodeDTO[];
-  callEdges: { source: string; target: string; kind: string }[];
-}
+import type { AnalyzeResponse, StatusResponse } from "./types";
 
 // ── API calls ─────────────────────────────────────────────────────────────────
 
