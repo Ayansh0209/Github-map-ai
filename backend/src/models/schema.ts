@@ -64,10 +64,15 @@ export interface FileNode {
     lineCount: number;     // total lines — useful for node sizing in D3
     parseStatus: ParseStatus;
     kind: FileKind;
-    isEntryPoint: boolean; // true for index.ts, main.ts, server.ts, app.ts
+    isEntryPoint: boolean; // derived from entryScore — true when score >= ENTRY_THRESHOLD
     functions: FunctionNode[];
     externalImports: string[];     // react, lodash — no edge, just metadata
     unresolvedImports: string[];   // imports that couldn't be resolved to a file
+
+    // ── Phase 1 additions (optional for backward compatibility) ───────────────
+    // Scoring details so the frontend/debugger can explain WHY a file is an entry point
+    entryScore?: number;           // weighted score from entryScorer
+    entryReasons?: string[];       // human-readable audit trail e.g. ["package.json:main +20", "app.listen() +10"]
 }
 
 export interface ImportEdge {
@@ -126,6 +131,11 @@ export interface BuilderInput {
     fileNodes: FileNode[];
     importEdges: ImportEdge[];
     allFunctions: FunctionNode[];
+
+    // ── Phase 1 additions (optional — entryScorer uses these if present) ──────
+    repoRoot?:       string;                    // absolute disk path to repo root
+    startupSignals?: Map<string, boolean>;      // fileId → hasStartupSignals
+    routeHandlers?:  Map<string, boolean>;      // fileId → hasRouteHandlers
 }
 
 export interface BuilderOutput {

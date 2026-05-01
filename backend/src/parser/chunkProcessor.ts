@@ -81,22 +81,26 @@ function countLines(absolutePath: string): number {
 // ── Result types ─────────────────────────────────────────────────────────────
 
 export interface ChunkResult {
-    fileNodes: FileNode[];
-    importEdges: ImportEdge[];
-    allFunctions: FunctionNode[];  // flat list — builder attaches to files
+    fileNodes:       FileNode[];
+    importEdges:     ImportEdge[];
+    allFunctions:    FunctionNode[];
+    startupSignals:  Map<string, boolean>;  // fileId → hasStartupSignals
+    routeHandlers:   Map<string, boolean>;  // fileId → hasRouteHandlers
 }
 
 // ── Single chunk processor ────────────────────────────────────────────────────
 
 async function processChunk(
-    decisions: ParseDecision[],
-    repoRoot: string,
-    resolver: ImportResolver,
-    chunkIndex: number
+    decisions:   ParseDecision[],
+    repoRoot:    string,
+    resolver:    ImportResolver,
+    chunkIndex:  number
 ): Promise<ChunkResult> {
-    const fileNodes: FileNode[] = [];
-    const importEdges: ImportEdge[] = [];
-    const allFunctions: FunctionNode[] = [];
+    const fileNodes:      FileNode[]    = [];
+    const importEdges:    ImportEdge[]  = [];
+    const allFunctions:   FunctionNode[] = [];
+    const startupSignals  = new Map<string, boolean>();
+    const routeHandlers   = new Map<string, boolean>();
 
     // One Project per chunk — disposed at end of this function
     const project = new Project({
@@ -139,9 +143,10 @@ async function processChunk(
                 decision.relativePath
             );
 
-            // Resolve raw imports → ImportEdges
-            const resolvedEdges: ImportEdge[] = [];
-            const unresolvedImports: string[] = [];
+            // Resolve raw imports → ImportEdges + accurate external list
+            const resolvedEdges:    ImportEdge[] = [];
+            const unresolvedImports: string[]    = [];
+            const confirmedExternal: string[]    = [];
 
             for (const rawImport of fileLevelResult.rawImports) {
                 const resolved = resolver.resolve(
@@ -150,24 +155,28 @@ async function processChunk(
                 );
 
                 if (resolved.kind === "internal") {
+                    // Alias or relative import resolved to a real file in the repo
                     resolvedEdges.push({
-                        source: decision.relativePath,
-                        target: resolved.resolvedPath,
-                        kind: rawImport.kind,
-                        symbols: rawImport.symbols,
+                        source:     decision.relativePath,
+                        target:     resolved.resolvedPath,
+                        kind:       rawImport.kind,
+                        symbols:    rawImport.symbols,
                         isTypeOnly: rawImport.isTypeOnly,
                     });
-                } else if (
-                    rawImport.specifier.startsWith(".") &&
-                    resolved.kind === "external"
-                ) {
-                    // relative import that couldn't be resolved on disk — truly unresolved
-                    unresolvedImports.push(rawImport.specifier);
+                } else if (resolved.kind === "external") {
+                    // Confirmed external (npm package, Node builtin)
+                    confirmedExternal.push(resolved.packageName);
+                } else if (resolved.kind === "unresolved") {
+                    // Alias matched but no file found — record for debugging
+                    unresolvedImports.push(resolved.specifier);
                 }
-                // external (node_modules) imports are recorded on FileNode, not as edges
             }
 
             importEdges.push(...resolvedEdges);
+
+            // Record semantic signals for entry scorer (keyed by fileId)
+            startupSignals.set(decision.relativePath, fileLevelResult.hasStartupSignals);
+            routeHandlers.set(decision.relativePath,  fileLevelResult.hasRouteHandlers);
 
             // ── Function level: only for "full" parse files ───────────────
             const functions: FunctionNode[] =
@@ -195,17 +204,18 @@ async function processChunk(
                         : "unknown";
 
             fileNodes.push({
-                id: decision.relativePath,
-                label: path.basename(decision.relativePath),
+                id:               decision.relativePath,
+                label:            path.basename(decision.relativePath),
                 language,
-                path: decision.relativePath,
-                sizeBytes: decision.sizeBytes,
-                lineCount: countLines(decision.absolutePath),
-                parseStatus: decision.mode === "skip" ? "skipped" : decision.mode,
-                kind: detectFileKind(decision.relativePath),
-                isEntryPoint: detectIsEntryPoint(decision.relativePath),
+                path:             decision.relativePath,
+                sizeBytes:        decision.sizeBytes,
+                lineCount:        countLines(decision.absolutePath),
+                parseStatus:      decision.mode === "skip" ? "skipped" : decision.mode,
+                kind:             detectFileKind(decision.relativePath),
+                // isEntryPoint is set to false here — entryScorer in builder.ts overwrites it
+                isEntryPoint:     false,
                 functions,
-                externalImports: fileLevelResult.externalImports,
+                externalImports:  [...new Set(confirmedExternal)],
                 unresolvedImports,
             });
 
@@ -235,7 +245,7 @@ async function processChunk(
     // IMPORTANT: dispose project to free ts-morph memory
     project.getSourceFiles().forEach((sf) => project.removeSourceFile(sf));
 
-    return { fileNodes, importEdges, allFunctions };
+    return { fileNodes, importEdges, allFunctions, startupSignals, routeHandlers };
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
@@ -252,9 +262,11 @@ export async function processAllFiles(
     const resolver = new ImportResolver(repoRoot);
     const chunks = chunkArray(filesToParse, CHUNK_SIZE);
 
-    const allFileNodes: FileNode[] = [];
-    const allImportEdges: ImportEdge[] = [];
-    const allFunctions: FunctionNode[] = [];
+    const allFileNodes:     FileNode[]    = [];
+    const allImportEdges:   ImportEdge[]  = [];
+    const allFunctions:     FunctionNode[] = [];
+    const allStartupSignals = new Map<string, boolean>();
+    const allRouteHandlers  = new Map<string, boolean>();
 
     console.log(
         `[chunkProcessor] ${filesToParse.length} files to parse in ${chunks.length} chunks`
@@ -273,6 +285,8 @@ export async function processAllFiles(
         allFileNodes.push(...result.fileNodes);
         allImportEdges.push(...result.importEdges);
         allFunctions.push(...result.allFunctions);
+        result.startupSignals.forEach((v, k) => allStartupSignals.set(k, v));
+        result.routeHandlers.forEach((v, k)  => allRouteHandlers.set(k, v));
 
         processedCount += chunk.length;
         onProgress?.(processedCount, filesToParse.length);
@@ -309,8 +323,10 @@ export async function processAllFiles(
     );
 
     return {
-        fileNodes: allFileNodes,
-        importEdges: allImportEdges,
+        fileNodes:      allFileNodes,
+        importEdges:    allImportEdges,
         allFunctions,
+        startupSignals: allStartupSignals,
+        routeHandlers:  allRouteHandlers,
     };
 }

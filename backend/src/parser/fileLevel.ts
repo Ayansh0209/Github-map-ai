@@ -14,8 +14,13 @@ export interface FileLevelResult {
     relativePath: string;
     language: Language;
     rawImports: RawImport[];       // before resolution
-    externalImports: string[];     // node_modules imports
+    externalImports: string[];     // node_modules imports (best-effort, resolver confirms)
     unresolvedImports: string[];   // relative imports that couldn't be resolved on disk
+
+    // ── Phase 1: semantic signals for entry point scoring ─────────────────────
+    // Detected via AST call expression scan — no cost beyond existing traversal
+    hasStartupSignals: boolean;    // app.listen(), createServer(), http.listen()
+    hasRouteHandlers: boolean;     // app.get/post/use(), router.get/post/put/delete/use()
 }
 
 export interface RawImport {
@@ -137,30 +142,57 @@ export function extractFileLevel(
         }
     });
 
-    // 4. Separate external (node_modules) from internal imports
-    //    Internal = starts with . or / or is a tsconfig alias (resolved later)
-    //    External = everything else (react, lodash, @types/...)
-    const internalRawImports = rawImports.filter((imp) => {
-        if (imp.specifier.startsWith(".") || imp.specifier.startsWith("/")) {
-            return true; // definitely internal relative path
+    // Startup and route handler signals — single pass over call expressions.
+    // We scan here (alongside import extraction) to avoid a redundant traversal.
+    let hasStartupSignals = false;
+    let hasRouteHandlers  = false;
+
+    // Identifiers that indicate a server is being started
+    const STARTUP_METHODS = new Set([
+        "listen",        // app.listen(), server.listen()
+        "createServer",  // http.createServer(), https.createServer()
+        "start",         // fastify.start(), server.start()
+        "bootstrap",     // NestJS bootstrap(AppModule)
+    ]);
+
+    // Identifiers that indicate HTTP route registration
+    const ROUTE_METHODS = new Set([
+        "get", "post", "put", "patch", "delete",
+        "head", "options", "all",
+        "use",           // middleware: app.use(), router.use()
+        "route",         // Express chained routing: router.route('/path')
+        "handle",        // some frameworks use router.handle()
+    ]);
+
+    sourceFile.getDescendantsOfKind(SyntaxKind.CallExpression).forEach((call) => {
+        const expr = call.getExpression();
+
+        // PropertyAccessExpression: obj.method()
+        if (expr.getKind() === SyntaxKind.PropertyAccessExpression) {
+            const methodName = expr.getLastChild()?.getText() ?? "";
+
+            if (STARTUP_METHODS.has(methodName)) hasStartupSignals = true;
+            if (ROUTE_METHODS.has(methodName))   hasRouteHandlers  = true;
         }
-        // could be a tsconfig alias — keep it, importResolver will decide
-        return true;
+
+        // Direct call: createServer() — no dot notation
+        const directName = expr.getText();
+        if (STARTUP_METHODS.has(directName)) hasStartupSignals = true;
     });
 
-    // track node_modules for metadata (no graph edge created)
-    rawImports.forEach((imp) => {
-        if (!imp.specifier.startsWith(".") && !imp.specifier.startsWith("/")) {
-            // looks like node_modules — importResolver confirms
-            externalImports.push(imp.specifier);
-        }
-    });
+    // Pass ALL rawImports to chunkProcessor — resolver decides internal vs external.
+    // The externalImports list here is a best-effort hint (no alias resolution yet).
+    const externalHints = rawImports
+        .filter((imp) => !imp.specifier.startsWith(".") && !imp.specifier.startsWith("/"))
+        .map((imp) => imp.specifier);
 
     return {
         relativePath,
         language,
-        rawImports: internalRawImports,
-        externalImports: [...new Set(externalImports)],
-        unresolvedImports: [], // filled in by chunkProcessor after resolver runs
+        rawImports,                             // ALL imports — resolver classifies
+        externalImports: [...new Set(externalHints)],
+        unresolvedImports: [],                  // filled after resolver runs
+        hasStartupSignals,
+        hasRouteHandlers,
     };
 }

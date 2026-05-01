@@ -152,7 +152,7 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
         // repoRoot is the extracted folder — needed for import resolution
         const repoRoot = path.join(os.tmpdir(), "codemap", jobId);
 
-        const { fileNodes, importEdges, allFunctions } = await processAllFiles(
+        const { fileNodes, importEdges, allFunctions, startupSignals, routeHandlers } = await processAllFiles(
             decisions,
             repoRoot,
             (done, total) => {
@@ -168,10 +168,13 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
         const { graphData, fileGraph, functionFiles } = buildGraph({
             owner,
             repo,
-            commitSha: metadata.commitSha,
+            commitSha:      metadata.commitSha,
             fileNodes,
             importEdges,
             allFunctions,
+            repoRoot,
+            startupSignals,
+            routeHandlers,
         });
 
         await updateProgress(job, 90, "graph built");

@@ -14,6 +14,7 @@ import {
     FileGraphPayload,
     FunctionFilePayload,
 } from "../models/schema";
+import { applyEntryScoring } from "./entryScorer";
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,7 +44,8 @@ function deduplicateImportEdges(edges: ImportEdge[]): ImportEdge[] {
 // ── Main builder ──────────────────────────────────────────────────────────────
 
 export function buildGraph(input: BuilderInput): BuilderOutput {
-    const { owner, repo, commitSha, fileNodes, importEdges, allFunctions } = input;
+    const { owner, repo, commitSha, fileNodes, importEdges, allFunctions,
+            startupSignals, routeHandlers, repoRoot } = input;
     const repoId = `${owner}/${repo}`;
     const generatedAt = new Date().toISOString();
 
@@ -90,6 +92,15 @@ export function buildGraph(input: BuilderInput): BuilderOutput {
     if (orphanCount > 0) {
         console.log(`[builder] dropped ${orphanCount} orphan import edges (target file not in graph)`);
     }
+
+    // ── Step 2.5: Apply entry point scoring ──────────────────────────────────
+    // Run AFTER dedup and validation so inDegree/outDegree counts are based on
+    // real edges only. entryScorer mutates fileNodes in place.
+    applyEntryScoring(fileNodes, validImportEdges, {
+        repoRoot:       repoRoot ?? "",
+        startupSignals: startupSignals ?? new Map(),
+        routeHandlers:  routeHandlers  ?? new Map(),
+    });
 
     // ── Step 3: Build function ID map ─────────────────────────────────────────
     // maps function name → array of FunctionNode IDs

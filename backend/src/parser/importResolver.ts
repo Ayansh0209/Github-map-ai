@@ -1,160 +1,105 @@
-// src/parser/adapters/typescript/importResolver.ts
-// Resolves raw import specifiers to real file paths in the repo
-// Handles: relative paths, tsconfig aliases, node_modules
+// src/parser/importResolver.ts
+// ─────────────────────────────────────────────────────────────────────────────
+// Resolves raw import specifiers to typed results.
+//
+// Resolution order for every specifier:
+//   1. Relative paths (./foo, ../bar) → disk lookup from fromFile directory
+//   2. Node.js builtins (fs, path, node:*)  → always external
+//   3. AliasResolver (tsconfig/jsconfig/package.json/workspace/fallback) → internal or external
+//   4. Anything else → external (npm package)
+//
+// The AliasResolver owns the alias cache, so repeated imports in a chunk are O(1).
+// ─────────────────────────────────────────────────────────────────────────────
 
-import fs from "fs";
+import fs   from "fs";
 import path from "path";
+import { AliasResolver, isNodeBuiltin } from "./aliasResolver";
 
 export type ResolvedImport =
-    | { kind: "internal"; resolvedPath: string }   // path relative to repo root
-    | { kind: "external"; packageName: string };   // node_modules
+    | { kind: "internal";   resolvedPath: string }  // path relative to repo root
+    | { kind: "external";   packageName: string }    // node_modules or builtin
+    | { kind: "unresolved"; specifier: string };     // alias matched but file missing on disk
 
-// ── tsconfig alias loader ───────────────────────────────────────────────────
-
-interface TsConfigPaths {
-    [alias: string]: string[];
-}
-
-function loadTsConfigPaths(repoRoot: string): TsConfigPaths {
-    try {
-        const tsConfigPath = path.join(repoRoot, "tsconfig.json");
-        if (!fs.existsSync(tsConfigPath)) return {};
-
-        const raw = fs.readFileSync(tsConfigPath, "utf-8");
-
-        // strip JSON comments before parsing (tsconfig allows comments)
-        const stripped = raw.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
-        const parsed = JSON.parse(stripped);
-
-        return parsed?.compilerOptions?.paths ?? {};
-    } catch {
-        // tsconfig unreadable or malformed — continue without aliases
-        return {};
-    }
-}
-
-// ── Extension resolution ────────────────────────────────────────────────────
+// ── File-system extension resolution ─────────────────────────────────────────
 
 const EXTENSIONS_TO_TRY = [
-    "",           // exact match first
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".cjs",
-    "/index.ts",
-    "/index.tsx",
-    "/index.js",
-    "/index.jsx",
+    "",
+    ".ts", ".tsx",
+    ".js", ".jsx",
+    ".mjs", ".cjs",
+    "/index.ts", "/index.tsx",
+    "/index.js",  "/index.jsx",
 ];
 
 function tryResolveOnDisk(candidate: string): string | null {
     for (const ext of EXTENSIONS_TO_TRY) {
-        const fullPath = candidate + ext;
-        if (fs.existsSync(fullPath)) return fullPath;
+        if (fs.existsSync(candidate + ext)) return candidate + ext;
     }
     return null;
 }
 
-// ── Main resolver ───────────────────────────────────────────────────────────
+// ── ImportResolver class ──────────────────────────────────────────────────────
 
 export class ImportResolver {
-    private tsConfigPaths: TsConfigPaths;
-    private repoRoot: string;
+    private readonly repoRoot: string;
+    private readonly alias:    AliasResolver;
 
     constructor(repoRoot: string) {
         this.repoRoot = repoRoot;
-        this.tsConfigPaths = loadTsConfigPaths(repoRoot);
-
-        const aliasCount = Object.keys(this.tsConfigPaths).length;
-        if (aliasCount > 0) {
-            console.log(
-                `[importResolver] loaded ${aliasCount} tsconfig aliases:`,
-                Object.keys(this.tsConfigPaths).join(", ")
-            );
-        } else {
-            console.log(
-                `[importResolver] no tsconfig aliases found in ${repoRoot}`
-            );
-        }
+        // AliasResolver loads all configs (tsconfig/jsconfig/package.json) once
+        // and caches every resolution — safe to construct once per repo
+        this.alias = new AliasResolver(repoRoot);
     }
-    resolve(specifier: string, fromFilePath: string): ResolvedImport {
-        // Case 1: relative path — starts with . or ..
+
+    /**
+     * Resolve a single import specifier to its kind + path/name.
+     *
+     * @param specifier   Raw import string as written in source ("./utils", "@/redux/slice")
+     * @param fromAbsFile Absolute disk path of the file containing the import
+     */
+    resolve(specifier: string, fromAbsFile: string): ResolvedImport {
+        // ── 1. Relative path ─────────────────────────────────────────────────
         if (specifier.startsWith(".") || specifier.startsWith("/")) {
-            return this.resolveRelative(specifier, fromFilePath);
+            return this.resolveRelative(specifier, fromAbsFile);
         }
 
-        // Case 2: tsconfig alias — check before node_modules
-        const aliasResolved = this.resolveAlias(specifier, fromFilePath);
-        if (aliasResolved) return aliasResolved;
+        // ── 2. Node.js built-in ──────────────────────────────────────────────
+        if (isNodeBuiltin(specifier)) {
+            const bare = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
+            return { kind: "external", packageName: bare };
+        }
 
-        // Case 3: node_modules — external dependency
-        const packageName = specifier.split("/")[0].startsWith("@")
-            ? specifier.split("/").slice(0, 2).join("/")   // @scope/package
-            : specifier.split("/")[0];                      // package
+        // ── 3. Alias / internal package resolution (cached) ──────────────────
+        const aliasResult = this.alias.resolve(specifier, fromAbsFile);
+        if (aliasResult) {
+            if (aliasResult.kind === "internal")   return aliasResult;
+            if (aliasResult.kind === "external")   return aliasResult;
+            if (aliasResult.kind === "unresolved") return { kind: "unresolved", specifier };
+        }
+
+        // ── 4. Everything else is an external npm package ────────────────────
+        const packageName = specifier.startsWith("@")
+            ? specifier.split("/").slice(0, 2).join("/")  // @scope/package
+            : specifier.split("/")[0];                     // package
 
         return { kind: "external", packageName };
     }
 
-    private resolveRelative(specifier: string, fromFilePath: string): ResolvedImport {
-        // fromFilePath is absolute path on disk
-        const fromDir = path.dirname(fromFilePath);
+    // ── Relative import resolution ────────────────────────────────────────────
+
+    private resolveRelative(specifier: string, fromAbsFile: string): ResolvedImport {
+        const fromDir   = path.dirname(fromAbsFile);
         const candidate = path.resolve(fromDir, specifier);
-        const resolved = tryResolveOnDisk(candidate);
+        const resolved  = tryResolveOnDisk(candidate);
 
         if (!resolved) {
-            // file doesn't exist on disk — could be generated or deleted
-            // treat as external to avoid phantom edges
-            return { kind: "external", packageName: specifier };
+            // File missing on disk — could be generated, deleted, or outside repo.
+            // Return unresolved so the caller can record it without creating phantom edges.
+            return { kind: "unresolved", specifier };
         }
 
-        // convert absolute disk path → repo-relative path (used as node ID)
-        const relativePath = path
-            .relative(this.repoRoot, resolved)
-            .replace(/\\/g, "/"); // normalise Windows separators
-
+        // Normalise to repo-relative forward-slash path (used as graph node ID)
+        const relativePath = path.relative(this.repoRoot, resolved).replace(/\\/g, "/");
         return { kind: "internal", resolvedPath: relativePath };
-    }
-
-    private resolveAlias(
-        specifier: string,
-        fromFilePath: string
-    ): ResolvedImport | null {
-        for (const [alias, targets] of Object.entries(this.tsConfigPaths)) {
-            // tsconfig paths can have wildcards: "@/*" → ["./src/*"]
-            const aliasPrefix = alias.endsWith("/*")
-                ? alias.slice(0, -2)   // "@/" from "@/*"
-                : alias;
-
-            if (!specifier.startsWith(aliasPrefix)) continue;
-
-            const remainder = specifier.slice(aliasPrefix.length);
-
-            for (const target of targets) {
-                const targetBase = target.endsWith("/*")
-                    ? target.slice(0, -2)
-                    : target;
-
-                const candidate = path.resolve(
-                    this.repoRoot,
-                    targetBase + remainder
-                );
-
-                const resolved = tryResolveOnDisk(candidate);
-                if (!resolved) continue;
-
-                const relativePath = path
-                    .relative(this.repoRoot, resolved)
-                    .replace(/\\/g, "/");
-
-                return { kind: "internal", resolvedPath: relativePath };
-            }
-        }
-        // log first-time alias miss to help debug monorepos
-        if (Object.keys(this.tsConfigPaths).length > 0) {
-            console.log(`[importResolver] alias miss: "${specifier}" — no alias matched`);
-        }
-        return null; // no alias matched
     }
 }
