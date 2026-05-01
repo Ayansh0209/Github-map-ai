@@ -164,8 +164,8 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
 
         await updateProgress(job, 75, "building graph");
 
-        // ── Step 9: Build graph ───────────────────────────────────────────────
-        const { graphData, fileGraph, functionFiles } = buildGraph({
+        // ── Step 9: Build graph ─────────────────────────────────────────────
+        const { graphData, fileGraph, functionFiles, searchIndex } = buildGraph({
             owner,
             repo,
             commitSha:      metadata.commitSha,
@@ -178,6 +178,26 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
         });
 
         await updateProgress(job, 90, "graph built");
+
+        // ── Persist search index to Redis for instant retrieval ───────────────
+        if (searchIndex) {
+            try {
+                const searchKey = `search:${owner}:${repo}`;
+                await redisConnection.set(searchKey, JSON.stringify(searchIndex));
+                console.log(`[worker] search index persisted to Redis (${searchIndex.entries.length} entries)`);
+            } catch (err) {
+                console.warn("[worker] Failed to persist search index:", (err as Error).message);
+            }
+        }
+
+        // ── Persist file graph for issue mapping context ──────────────────────
+        try {
+            const graphKey = `graph:${owner}:${repo}`;
+            await redisConnection.set(graphKey, JSON.stringify(fileGraph));
+            console.log(`[worker] file graph persisted to Redis for issue mapper`);
+        } catch (err) {
+            console.warn("[worker] Failed to persist file graph:", (err as Error).message);
+        }
 
         const result = {
             success: true,

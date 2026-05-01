@@ -6,6 +6,7 @@ import { errorHandler } from "./middleware/errorHandler"
 import healthRouter from "./routes/health";
 import analyzeRoute from "./routes/analyze";
 import statusRoute from "./routes/status";
+import searchRoute from "./routes/search";
 
 const app = express();
 
@@ -17,6 +18,7 @@ app.use(logger);
 app.use("/health", healthRouter);
 app.use("/analyze", analyzeRoute);
 app.use("/status", statusRoute);
+app.use("/search", searchRoute);
 
 app.get("/", (req, res) => {
     res.send("CodeMap AI Backend Running");

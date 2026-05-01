@@ -8,6 +8,7 @@ import FunctionGraph from "./components/FunctionGraph";
 import DetailsPanel from "./components/DetailsPanel";
 import StatsBar from "./components/StatsBar";
 import GraphControls from "./components/GraphControls";
+import SearchPanel from "./components/SearchPanel";
 import { useJobPolling } from "./hooks/useJobPolling";
 import { submitAnalysis } from "./lib/client";
 import type {
@@ -35,6 +36,7 @@ export default function Home() {
     useState<FunctionNodeDTO | null>(null);
   const [view, setView] = useState<ViewMode>("file-graph");
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchPanelOpen, setSearchPanelOpen] = useState(false);
   const resetZoomRef = useRef<(() => void) | null>(null);
 
   const isLoading =
@@ -161,7 +163,20 @@ export default function Home() {
     setSelectedFunction(null);
     setView("file-graph");
     setSearchQuery("");
+    setSearchPanelOpen(false);
   }, [reset]);
+
+  // ── Cmd+K keyboard shortcut for search panel ──────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchPanelOpen(prev => !prev);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   return (
     <div className="flex flex-col min-h-screen gradient-bg">
@@ -313,6 +328,7 @@ export default function Home() {
               onSearchChange={setSearchQuery}
               onViewChange={handleViewChange}
               onResetView={handleResetView}
+              onSearchOpen={() => setSearchPanelOpen(true)}
               fileCount={fileGraph.files.length}
               edgeCount={fileGraph.importEdges.length}
               hasFunctionSelected={!!selectedFunction}
@@ -398,6 +414,23 @@ export default function Home() {
           onClose={() => setSelectedFile(null)}
           onFileNavigate={handleFileNavigate}
           onFunctionClick={handleFunctionClick}
+        />
+      )}
+
+      {/* ── Search Panel (sidebar overlay) ──────────────────────────────── */}
+      {isDone && fileGraph && (
+        <SearchPanel
+          isOpen={searchPanelOpen}
+          onClose={() => setSearchPanelOpen(false)}
+          owner={owner}
+          repo={repo}
+          onSelectFile={(filePath) => {
+            const file = fileGraph.files.find((f) => f.id === filePath);
+            if (file) {
+              setSelectedFile(file);
+              setSearchPanelOpen(false);
+            }
+          }}
         />
       )}
 

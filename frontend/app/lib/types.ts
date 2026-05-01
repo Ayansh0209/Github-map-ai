@@ -15,6 +15,8 @@ export interface GraphStats {
   totalCallEdges: number;
   testFiles: number;
   entryPoints: number;
+  deadCodeFiles: number;
+  workspacePackages: number;
 }
 
 // ── File-level types ──────────────────────────────────────────────────────────
@@ -38,6 +40,15 @@ export interface FileNodeDTO {
   cycleScore?: number;
   hubScore?: number;
   architecturalImportance?: number;
+  // Phase 3: workspace
+  workspacePackage?: string;
+  packageRoot?: string;
+  packageName?: string;
+  // Phase 3: dead code
+  deadCodeScore?: number;
+  isDeadCode?: boolean;
+  unusedExports?: string[];
+  orphanSymbols?: string[];
 }
 
 export interface ImportEdgeDTO {
@@ -114,4 +125,26 @@ export interface StatusResponse {
   stats?: GraphStats;
   _inlineFileGraph?: FileGraphPayload;
   _functionFiles?: Record<string, FunctionFilePayload>;
+}
+
+// ── Search types ───────────────────────────────────────────────────────────────
+
+export interface SearchResultItem {
+  id: string;
+  type: "file" | "function" | "export" | "test";
+  name: string;
+  filePath: string;
+  language?: string;
+  kind?: string;
+  isEntryPoint?: boolean;
+  isDeadCode?: boolean;
+  packageName?: string;
+  score: number;
+  matchedTokens?: string[];
+}
+
+export interface SearchResponse {
+  query: string;
+  total: number;
+  results: SearchResultItem[];
 }

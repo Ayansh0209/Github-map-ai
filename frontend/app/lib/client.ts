@@ -14,9 +14,11 @@ export type {
   CallEdgeDTO,
   FunctionFilePayload,
   ViewMode,
+  SearchResultItem,
+  SearchResponse,
 } from "./types";
 
-import type { AnalyzeResponse, StatusResponse } from "./types";
+import type { AnalyzeResponse, StatusResponse, SearchResponse } from "./types";
 
 // ── API calls ─────────────────────────────────────────────────────────────────
 
@@ -43,5 +45,23 @@ export async function getJobStatus(jobId: string): Promise<StatusResponse> {
     throw new Error(err.error || `HTTP ${res.status}`);
   }
 
+  return res.json();
+}
+
+export async function searchCode(
+  owner: string,
+  repo: string,
+  query: string,
+  type?: "file" | "function" | "export" | "test",
+  limit = 30,
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q: query, owner, repo, limit: limit.toString() });
+  if (type) params.set("type", type);
+
+  const res = await fetch(`${API_BASE}/search?${params}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Search failed" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
   return res.json();
 }

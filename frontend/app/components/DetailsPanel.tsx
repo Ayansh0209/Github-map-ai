@@ -132,7 +132,37 @@ export default function DetailsPanel({
             {file.architecturalImportance !== undefined && file.architecturalImportance > 0 && (
               <InfoRow label="Arch Weight" value={file.architecturalImportance.toString()} />
             )}
+            {file.workspacePackage && (
+              <InfoRow label="Package" value={file.workspacePackage} />
+            )}
           </div>
+          {/* Subtle dead code indicator — only shown when file has meaningful dead score */}
+          {file.isDeadCode && (
+            <div className="mt-2 rounded-lg px-3 py-2 text-xs flex items-center gap-2"
+              style={{ background: "rgba(248,81,73,0.08)", border: "1px dashed rgba(248,81,73,0.3)" }}>
+              <span style={{ opacity: 0.7 }}>💀</span>
+              <span style={{ color: "#f85149", fontWeight: 600 }}>Potential dead code</span>
+              <span style={{ color: "#8b949e", marginLeft: "auto" }}>score: {file.deadCodeScore ?? 0}</span>
+            </div>
+          )}
+          {/* Unused exports — subtle list */}
+          {file.unusedExports && file.unusedExports.length > 0 && (
+            <div className="mt-2 rounded-lg px-3 py-2 text-xs"
+              style={{ background: "rgba(240,136,62,0.06)", border: "1px dashed rgba(240,136,62,0.25)" }}>
+              <div style={{ color: "#f0883e", fontWeight: 600, marginBottom: "4px" }}>
+                Unused Exports ({file.unusedExports.length})
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {file.unusedExports.map((exp, i) => (
+                  <span key={i} className="px-1.5 py-0.5 rounded text-[10px]"
+                    style={{ background: "rgba(240,136,62,0.12)", color: "#f0883e",
+                      fontFamily: "var(--font-geist-mono), monospace" }}>
+                    {exp}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
         {/* ── ENTRY REASONS ───────────────────────────────────────────────── */}

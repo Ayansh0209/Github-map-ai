@@ -86,6 +86,18 @@ export interface FileNode {
     cycleScore?: number;           // severity of circular dependencies involving this file
     hubScore?: number;             // architectural centrality/hub score
     architecturalImportance?: number; // overall architectural weight
+
+    // ── Phase 3 additions ─────────────────────────────────────────────────────
+    // Workspace / monorepo context
+    workspacePackage?: string;     // name of the workspace package this file belongs to
+    packageRoot?: string;          // relative path to this file's package root
+    packageName?: string;          // display name of the package
+
+    // Dead code analysis — weighted scoring, not binary
+    deadCodeScore?: number;        // 0–100 weighted dead code likelihood
+    isDeadCode?: boolean;          // true if deadCodeScore >= threshold
+    unusedExports?: string[];      // exported symbols not imported anywhere
+    orphanSymbols?: string[];      // internal functions/variables never referenced
 }
 
 export interface ImportEdge {
@@ -122,7 +134,13 @@ export interface GraphData {
         totalCallEdges: number;
         testFiles: number;
         entryPoints: number;
+        deadCodeFiles: number;
+        workspacePackages: number;
     };
+
+    // ── Phase 3 additions ─────────────────────────────────────────────────────
+    workspaceInfo?: WorkspaceInfo;
+    repoMetadata?: RepoMetadata;
 }
 
 export interface FileGraphPayload {
@@ -160,4 +178,72 @@ export interface BuilderOutput {
     graphData: GraphData;
     fileGraph: FileGraphPayload;
     functionFiles: Map<string, FunctionFilePayload>;
+    searchIndex?: SearchIndex;
+}
+
+// ── Phase 3: Workspace / Monorepo types ───────────────────────────────────────
+
+export interface WorkspacePackageInfo {
+    name: string;              // package.json "name" field
+    root: string;              // relative path to the package root
+    version?: string;          // package version
+    isPrivate?: boolean;       // true if private
+    dependencies: string[];    // internal workspace dependencies
+}
+
+export interface WorkspaceInfo {
+    isMonorepo: boolean;
+    tool: "npm" | "yarn" | "pnpm" | "turbo" | "nx" | "lerna" | "none";
+    packages: WorkspacePackageInfo[];
+}
+
+// ── Phase 3: Search index types ───────────────────────────────────────────────
+
+export interface SearchIndexEntry {
+    id: string;                // file path or function ID
+    type: "file" | "function" | "export" | "test";
+    name: string;              // display name
+    filePath: string;          // parent file path
+    language?: string;
+    kind?: string;             // FileKind or FunctionKind
+    isEntryPoint?: boolean;
+    isDeadCode?: boolean;
+    packageName?: string;      // workspace package
+    tokens: string[];          // pre-tokenized search terms
+}
+
+export interface SearchIndex {
+    entries: SearchIndexEntry[];
+    generatedAt: string;
+}
+
+// ── Phase 3: Issue mapping result types ───────────────────────────────────────
+
+export interface IssueMappingCandidate {
+    filePath: string;
+    matchScore: number;        // 0–100 deterministic confidence
+    matchReasons: string[];    // why this file was matched
+    functions: string[];       // relevant function names within the file
+    isEntryPoint: boolean;
+    isDeadCode: boolean;
+}
+
+export interface IssueMappingResult {
+    query: string;
+    candidates: IssueMappingCandidate[];
+    hotspots: string[];        // top-5 most architecturally relevant files
+    relevantSymbols: string[]; // matched exported symbols
+    totalMatches: number;
+}
+
+// ── Phase 3: Repo metadata types ──────────────────────────────────────────────
+
+export interface RepoMetadata {
+    packages: { name: string; path: string; isPrivate: boolean }[];
+    scripts: Record<string, string>;     // package.json scripts
+    ciSystems: string[];                 // e.g. ["github-actions", "docker"]
+    buildTools: string[];                // e.g. ["vite", "webpack", "tsc"]
+    envFiles: string[];                  // .env, .env.local, etc.
+    dockerFiles: string[];               // Dockerfile, docker-compose.yml
+    architectureZones: { zone: string; paths: string[] }[];
 }

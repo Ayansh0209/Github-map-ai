@@ -16,6 +16,10 @@ import {
 } from "../models/schema";
 import { applyEntryScoring } from "./entryScorer";
 import { applyGraphAnalytics } from "./graphAnalytics";
+import { detectWorkspaces, resolveFilePackage } from "./workspaceResolver";
+import { analyzeDeadCode } from "./deadCodeAnalyzer";
+import { buildSearchIndex } from "../search/searchIndexer";
+import { extractRepoMetadata } from "./repoMetadata";
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,6 +162,22 @@ export function buildGraph(input: BuilderInput): BuilderOutput {
         console.log(`  ${f.id} — importance: ${f.architecturalImportance} hub: ${f.hubScore} entry: ${f.isEntryPoint}`)
     );
 
+    // ── Step 2.9: Workspace / Monorepo Resolution ────────────────────────────
+    const workspaceInfo = repoRoot ? detectWorkspaces(repoRoot) : undefined;
+    if (workspaceInfo && workspaceInfo.packages.length > 0) {
+        for (const file of fileNodes) {
+            const pkg = resolveFilePackage(file.id, workspaceInfo.packages);
+            if (pkg) {
+                file.workspacePackage = pkg.name;
+                file.packageRoot = pkg.root;
+                file.packageName = pkg.name;
+            }
+        }
+    }
+
+    // ── Step 2.10: Dead Code Analysis ─────────────────────────────────────────
+    const deadCodeStats = analyzeDeadCode(fileNodes, validImportEdges, allFunctions);
+
     // ── Step 3: Build function ID map ─────────────────────────────────────────
     // maps function name → array of FunctionNode IDs
     // array because same name can exist in different files
@@ -287,8 +307,19 @@ export function buildGraph(input: BuilderInput): BuilderOutput {
             totalCallEdges: uniqueCallEdges.length,
             testFiles: fileNodes.filter((f) => f.kind === "test").length,
             entryPoints: fileNodes.filter((f) => f.isEntryPoint).length,
+            deadCodeFiles: deadCodeStats.deadCodeFiles,
+            workspacePackages: workspaceInfo?.packages.length ?? 0,
         },
+        workspaceInfo,
     };
+
+    // ── Step 7.5: Attach repo metadata ────────────────────────────────────────
+    if (repoRoot) {
+        graphData.repoMetadata = extractRepoMetadata(
+            repoRoot,
+            workspaceInfo?.packages ?? [],
+        );
+    }
 
     // ── Step 8: Validation — log anomalies, never crash ───────────────────────
     let selfCallCount = 0;
@@ -344,5 +375,8 @@ export function buildGraph(input: BuilderInput): BuilderOutput {
 
     console.log(`[builder] split into 1 file_graph + ${functionFiles.size} function files`);
 
-    return { graphData, fileGraph, functionFiles };
+    // ── Step 10: Build search index ────────────────────────────────────────────
+    const searchIndex = buildSearchIndex(fileNodes, allFunctions);
+
+    return { graphData, fileGraph, functionFiles, searchIndex };
 }

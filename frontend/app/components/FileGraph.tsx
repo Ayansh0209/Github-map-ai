@@ -239,6 +239,13 @@ export default function FileGraph({
           if (d.data.kind === "test") {
             circle.attr("fill-opacity", 0.45).attr("stroke", "#22c55e").attr("stroke-width", 1.5).attr("stroke-dasharray", "3,2");
           }
+          // Subtle dead code indicator — lower opacity + faint red dashed ring
+          if (d.data.isDeadCode) {
+            circle.attr("fill-opacity", 0.25);
+            g2.append("circle").attr("r", r + 3).attr("fill", "none")
+              .attr("stroke", "#f85149").attr("stroke-width", 1).attr("stroke-opacity", 0.3)
+              .attr("stroke-dasharray", "2,3").attr("pointer-events", "none");
+          }
         }
 
         // Label
@@ -398,6 +405,7 @@ export default function FileGraph({
         <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Test file</span></div>
         <div className="flex items-center gap-2"><span className="w-3 h-0.5" style={{ background: "#f85149", borderTop: "2px dashed #f85149" }} /><span style={{ color: "#e6edf3" }}>Circular Dep</span></div>
         <div className="flex items-center gap-2"><svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg><span style={{ color: "#e6edf3" }}>Config</span></div>
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#f85149", opacity: 0.5 }} /><span style={{ color: "#e6edf3" }}>Dead Code</span></div>
         <div className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid #30363d", marginTop: "4px" }}>
           <span className="w-3 h-0.5 rounded" style={{ background: "#f0883e" }} /><span style={{ color: "#e6edf3" }}>Selected</span>
         </div>
