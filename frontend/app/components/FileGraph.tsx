@@ -14,9 +14,8 @@ interface FileGraphProps {
   repo: string;
   searchQuery: string;
   selectedFileId: string | null;
+  resetZoomRef?: React.MutableRefObject<(() => void) | null>;
 }
-
-// ── Types ────────────────────────────────────────────────────────────────────
 
 interface SimNode extends d3.SimulationNodeDatum {
   id: string;
@@ -29,8 +28,6 @@ interface SimNode extends d3.SimulationNodeDatum {
 interface SimLink extends d3.SimulationLinkDatum<SimNode> {
   data: ImportEdgeDTO;
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function getRadius(n: SimNode): number {
   const sqrt = Math.sqrt(n.data.lineCount || 1);
@@ -52,21 +49,21 @@ function getDominantLanguageColor(nodes: SimNode[]): string {
   return getLanguageColor(maxLang);
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+function trunc(s: string, max: number) {
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
 
 export default function FileGraph({
-  files,
-  edges,
-  onFileClick,
-  searchQuery,
-  selectedFileId,
+  files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef,
 }: FileGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<d3.Selection<SVGSVGElement, unknown, null, undefined> | null>(null);
+  const zoomRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  const gRef = useRef<d3.Selection<SVGGElement, unknown, null, undefined> | null>(null);
   const nodeGRef = useRef<d3.Selection<SVGGElement, SimNode, SVGGElement, unknown> | null>(null);
   const linkRef = useRef<d3.Selection<SVGLineElement, SimLink, SVGGElement, unknown> | null>(null);
-  const labelRef = useRef<d3.Selection<SVGTextElement, SimNode, SVGGElement, unknown> | null>(null);
   const simulationRef = useRef<d3.Simulation<SimNode, SimLink> | null>(null);
+  const autoFittedRef = useRef(false);
   const onFileClickRef = useRef(onFileClick);
   const selectedFileIdRef = useRef(selectedFileId);
   const [error, setError] = useState<string | null>(null);
@@ -74,12 +71,28 @@ export default function FileGraph({
   useEffect(() => { onFileClickRef.current = onFileClick; }, [onFileClick]);
   useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
 
-  // ── Main graph build effect ─────────────────────────────────────────────────
+  // ── Selection ring — runs when selectedFileId changes, NO camera move ────────
+  useEffect(() => {
+    if (!nodeGRef.current) return;
+    nodeGRef.current.select<SVGCircleElement>(".sel-ring")
+      .attr("r", 0).attr("stroke-opacity", 0);
+    if (selectedFileId) {
+      nodeGRef.current
+        .filter((d: SimNode) => d.id === selectedFileId)
+        .select<SVGCircleElement>(".sel-ring")
+        .attr("r", (d: SimNode) => getRadius(d) + 7)
+        .attr("stroke-opacity", 1);
+    }
+    nodeGRef.current.select<SVGTextElement>("text").attr("opacity", (d: SimNode) =>
+      d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileId ? 1 : 0
+    );
+  }, [selectedFileId]);
+
+  // ── Main graph build ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!containerRef.current || files.length === 0) return;
-
-    // Cleanup previous
-    if (simulationRef.current) simulationRef.current.stop();
+    autoFittedRef.current = false;
+    simulationRef.current?.stop();
     d3.select(containerRef.current).selectAll("*").remove();
     setError(null);
 
@@ -88,50 +101,35 @@ export default function FileGraph({
     const height = container.clientHeight || 600;
 
     try {
-      // ── 1. Compute degrees ─────────────────────────────────────────────
+      // 1. Degrees
       const degreeMap = new Map<string, number>();
       for (const e of edges) {
         degreeMap.set(e.source, (degreeMap.get(e.source) || 0) + 1);
         degreeMap.set(e.target, (degreeMap.get(e.target) || 0) + 1);
       }
-      const degrees = [...degreeMap.values()].sort((a, b) => a - b);
-      const hubThreshold = degrees[Math.floor(degrees.length * 0.9)] ?? Infinity;
+      const sorted = [...degreeMap.values()].sort((a, b) => a - b);
+      const hubThreshold = sorted[Math.floor(sorted.length * 0.9)] ?? Infinity;
 
-      // ── 2. Build SimNodes ─────────────────────────────────────────────
+      // 2. Build nodes
       const nodeMap = new Map<string, SimNode>();
-      const nodes: SimNode[] = files.map((f) => {
+      const nodes: SimNode[] = files.map(f => {
         const deg = degreeMap.get(f.id) || 0;
-        const n: SimNode = {
-          id: f.id,
-          data: f,
-          folder: getFolderGroup(f.id),
-          degree: deg,
-          isHub: deg >= hubThreshold && deg > 0,
-        };
+        const n: SimNode = { id: f.id, data: f, folder: getFolderGroup(f.id), degree: deg, isHub: deg >= hubThreshold && deg > 0 };
         nodeMap.set(f.id, n);
         return n;
       });
-
       const links: SimLink[] = edges
-        .filter((e) => nodeMap.has(e.source) && nodeMap.has(e.target))
-        .map((e) => ({ source: e.source, target: e.target, data: e }));
+        .filter(e => nodeMap.has(e.source) && nodeMap.has(e.target))
+        .map(e => ({ source: e.source, target: e.target, data: e }));
 
-      // ── 3. DAG layout (try, gracefully fallback) ──────────────────────
+      // 3. DAG layout with cycle-breaking DFS
       const adj = new Map<string, string[]>();
-      for (const e of edges) {
-        if (!adj.has(e.source)) adj.set(e.source, []);
-        adj.get(e.source)!.push(e.target);
-      }
-
-      // DFS to break cycles
-      const visited = new Set<string>();
-      const onStack = new Set<string>();
-      const dagParents = new Map<string, string[]>();
-
+      for (const e of edges) { if (!adj.has(e.source)) adj.set(e.source, []); adj.get(e.source)!.push(e.target); }
+      const visited = new Set<string>(), onStack = new Set<string>(), dagParents = new Map<string, string[]>();
       const dfs = (u: string) => {
         visited.add(u); onStack.add(u);
         for (const v of adj.get(u) || []) {
-          if (!onStack.has(v)) { // don't follow back-edges
+          if (!onStack.has(v)) {
             if (!dagParents.has(v)) dagParents.set(v, []);
             dagParents.get(v)!.push(u);
             if (!visited.has(v)) dfs(v);
@@ -141,299 +139,250 @@ export default function FileGraph({
       };
       files.filter(f => f.isEntryPoint).forEach(f => { if (!visited.has(f.id)) dfs(f.id); });
       files.forEach(f => { if (!visited.has(f.id)) dfs(f.id); });
-
-      const dagData = files.map(f => ({ id: f.id, parentIds: dagParents.get(f.id) || [] }));
-
       try {
-        const graph = graphStratify()(dagData);
+        const graph = graphStratify()(files.map(f => ({ id: f.id, parentIds: dagParents.get(f.id) || [] })));
         sugiyama().nodeSize([120, 100])(graph);
-        for (const dagNode of graph.nodes()) {
-          const n = nodeMap.get(dagNode.data.id);
-          if (n && dagNode.x !== undefined) { n.x = dagNode.x; n.y = dagNode.y; }
-        }
+        for (const dn of graph.nodes()) { const n = nodeMap.get(dn.data.id); if (n && dn.x !== undefined) { n.x = dn.x; n.y = dn.y; } }
       } catch {
-        // fallback: random start positions — force simulation handles layout
-        nodes.forEach((n, i) => {
-          n.x = (Math.random() - 0.5) * width;
-          n.y = (Math.random() - 0.5) * height;
-        });
+        nodes.forEach(n => { n.x = (Math.random() - 0.5) * width; n.y = (Math.random() - 0.5) * height; });
       }
 
-      // ── 4. SVG ─────────────────────────────────────────────────────────
-      const svg = d3
-        .select(container)
-        .append("svg")
-        .attr("width", "100%")
-        .attr("height", "100%")
+      // 4. SVG
+      const svg = d3.select(container).append("svg")
+        .attr("width", "100%").attr("height", "100%")
         .attr("viewBox", `0 0 ${width} ${height}`)
         .attr("preserveAspectRatio", "xMidYMid meet");
       svgRef.current = svg;
 
       const defs = svg.append("defs");
-      for (const [id, color] of [["default", "#30363d"], ["highlight", "#58a6ff"]]) {
-        defs.append("marker")
-          .attr("id", `arrow-${id}`)
-          .attr("viewBox", "0 -5 10 10")
-          .attr("refX", 20).attr("refY", 0)
-          .attr("markerWidth", 5).attr("markerHeight", 5)
-          .attr("orient", "auto")
-          .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", color);
+      for (const [id, col] of [["default", "#252c36"], ["highlight", "#58a6ff"]] as [string, string][]) {
+        defs.append("marker").attr("id", `arrow-${id}`).attr("viewBox", "0 -5 10 10")
+          .attr("refX", 22).attr("refY", 0).attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto")
+          .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", col);
       }
+      // Hub glow filter
+      const filt = defs.append("filter").attr("id", "hub-glow").attr("x", "-50%").attr("y", "-50%").attr("width", "200%").attr("height", "200%");
+      filt.append("feGaussianBlur").attr("stdDeviation", "3").attr("result", "blur");
+      const fm = filt.append("feMerge");
+      fm.append("feMergeNode").attr("in", "blur");
+      fm.append("feMergeNode").attr("in", "SourceGraphic");
 
       const g = svg.append("g");
-      const zoom = d3.zoom<SVGSVGElement, unknown>()
-        .scaleExtent([0.05, 8])
-        .on("zoom", (ev) => g.attr("transform", ev.transform));
+      gRef.current = g;
+      const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.05, 8])
+        .on("zoom", ev => g.attr("transform", ev.transform));
+      zoomRef.current = zoom;
       svg.call(zoom);
 
+      // Expose reset zoom via ref
+      if (resetZoomRef) {
+        resetZoomRef.current = () => {
+          const b = (g.node() as SVGGElement)?.getBBox();
+          if (!b || b.width === 0) return;
+          const scale = 0.85 / Math.max(b.width / width, b.height / height);
+          svg.transition().duration(600).call(zoom.transform,
+            d3.zoomIdentity.translate(width / 2 - (b.x + b.width / 2) * scale, height / 2 - (b.y + b.height / 2) * scale).scale(scale));
+        };
+      }
+
       const folderBg = g.append("g").attr("class", "folder-bg");
-
-      // Tooltip div
       const tooltip = d3.select(container).append("div")
-        .style("position", "absolute")
-        .style("background", "rgba(13,17,23,0.95)")
-        .style("border", "1px solid #30363d")
-        .style("border-radius", "8px")
-        .style("padding", "8px 12px")
-        .style("font-size", "12px")
-        .style("color", "#e6edf3")
-        .style("pointer-events", "none")
-        .style("opacity", "0")
-        .style("max-width", "260px")
-        .style("z-index", "100");
+        .style("position", "absolute").style("background", "rgba(13,17,23,0.95)")
+        .style("border", "1px solid #30363d").style("border-radius", "8px")
+        .style("padding", "8px 12px").style("font-size", "12px").style("color", "#e6edf3")
+        .style("pointer-events", "none").style("opacity", "0").style("max-width", "260px").style("z-index", "100");
 
-      // ── 5. Edges ───────────────────────────────────────────────────────
+      // 5. Edges
       const link = g.append("g")
-        .selectAll<SVGLineElement, SimLink>("line")
-        .data(links)
-        .join("line")
-        .attr("stroke", d => d.data.isTypeOnly ? "#2d333b" : "#30363d")
+        .selectAll<SVGLineElement, SimLink>("line").data(links).join("line")
+        .attr("stroke", d => d.data.isTypeOnly ? "#1c2128" : "#252c36")
         .attr("stroke-width", d => d.data.isTypeOnly ? 0.5 : Math.min(3, Math.max(1, (d.data.symbols?.length || 1) * 0.4)))
         .attr("stroke-dasharray", d => d.data.kind === "dynamic" ? "5,3" : "none")
-        .attr("marker-end", "url(#arrow-default)");
+        .attr("stroke-opacity", 0.7).attr("marker-end", "url(#arrow-default)");
       linkRef.current = link;
 
-      // ── 6. Nodes ───────────────────────────────────────────────────────
+      // 6. Nodes
       const nodeG = g.append("g")
-        .selectAll<SVGGElement, SimNode>("g")
-        .data(nodes)
-        .join("g")
+        .selectAll<SVGGElement, SimNode>("g").data(nodes).join("g")
         .style("cursor", "pointer")
-        .call(
-          d3.drag<SVGGElement, SimNode>()
-            .on("start", (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-            .on("drag", (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
-            .on("end", (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; })
-        );
+        .call(d3.drag<SVGGElement, SimNode>()
+          .on("start", (_ev, d) => { d.fx = d.x; d.fy = d.y; })
+          .on("drag", (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = ev.x; d.fy = ev.y; })
+          .on("end", (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
       nodeGRef.current = nodeG;
 
-      // Draw shapes
-      nodeG.each(function (d) {
+      nodeG.each(function(d) {
         const g2 = d3.select(this);
         const r = getRadius(d);
+        // Selection ring (orange, hidden by default)
+        g2.append("circle").attr("class", "sel-ring").attr("r", 0)
+          .attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 2.5)
+          .attr("stroke-opacity", 0).attr("pointer-events", "none");
+        // Hover ring (blue, hidden by default)
+        g2.append("circle").attr("class", "hover-ring").attr("r", 0)
+          .attr("fill", "none").attr("stroke", "#58a6ff").attr("stroke-width", 1.5)
+          .attr("stroke-opacity", 0).attr("pointer-events", "none");
 
         if (d.data.kind === "config") {
-          g2.append("path")
-            .attr("d", `M0,${-r} L${r},0 L0,${r} L${-r},0 Z`)
-            .attr("fill", "#6b7280");
+          g2.append("path").attr("d", `M0,${-r} L${r},0 L0,${r} L${-r},0 Z`).attr("fill", "#6b7280");
         } else {
           const circle = g2.append("circle").attr("r", r);
           if (d.data.isEntryPoint) {
             circle.attr("fill", "#22c55e");
-            // pulse ring
-            g2.append("circle").attr("r", r + 4)
-              .attr("fill", "none")
-              .attr("stroke", "#22c55e")
-              .attr("stroke-width", 1.5)
-              .attr("stroke-opacity", 0.5)
-              .attr("class", "pulse-ring");
+            g2.append("circle").attr("r", r + 5).attr("fill", "none")
+              .attr("stroke", "#22c55e").attr("stroke-width", 1.5).attr("stroke-opacity", 0.35).attr("pointer-events", "none");
           } else if (d.isHub) {
-            circle.attr("fill", brightenColor(getLanguageColor(d.data.language)));
+            circle.attr("fill", brightenColor(getLanguageColor(d.data.language))).attr("filter", "url(#hub-glow)");
           } else {
             circle.attr("fill", getLanguageColor(d.data.language));
           }
           if (d.data.kind === "test") {
-            circle.attr("fill-opacity", 0.5)
-              .attr("stroke", "#22c55e")
-              .attr("stroke-width", 1.5)
-              .attr("stroke-dasharray", "3,2");
+            circle.attr("fill-opacity", 0.45).attr("stroke", "#22c55e").attr("stroke-width", 1.5).attr("stroke-dasharray", "3,2");
           }
         }
 
         // Label
-        const always = d.data.isEntryPoint || d.isHub || d.degree >= 5;
-        g2.append("text")
-          .attr("dy", getRadius(d) + 13)
-          .attr("text-anchor", "middle")
+        const important = d.data.isEntryPoint || d.isHub || d.degree >= 5;
+        g2.append("text").attr("dy", r + 14).attr("text-anchor", "middle")
           .attr("fill", "#e6edf3")
-          .attr("font-size", "10px")
+          .attr("font-size", d.data.isEntryPoint ? "11px" : d.isHub ? "10px" : "9px")
+          .attr("font-weight", d.data.isEntryPoint ? "600" : "normal")
           .attr("font-family", "ui-monospace, monospace")
           .attr("pointer-events", "none")
-          .attr("opacity", always ? 1 : 0)
-          .text(d.data.label);
+          .attr("opacity", important ? 1 : 0)
+          .text(trunc(d.data.label, 22));
       });
 
-      labelRef.current = nodeG.select<SVGTextElement>("text");
-
-      // ── 7. Interactions ────────────────────────────────────────────────
+      // 7. Interactions
       nodeG
-        .on("mouseover", function (ev, d) {
+        .on("mouseover", function(ev, d) {
+          d3.select(this).select(".hover-ring").attr("r", getRadius(d) + 4).attr("stroke-opacity", 0.8);
           d3.select(this).select("text").attr("opacity", 1);
-          const connectedIds = new Set([d.id]);
-          links.forEach(l => {
-            const s = (l.source as SimNode).id, t = (l.target as SimNode).id;
-            if (s === d.id) connectedIds.add(t);
-            if (t === d.id) connectedIds.add(s);
-          });
-          nodeG.attr("opacity", n => connectedIds.has(n.id) ? 1 : 0.08);
-          link
-            .attr("stroke", l => {
-              const s = (l.source as SimNode).id, t = (l.target as SimNode).id;
-              return s === d.id || t === d.id ? "#58a6ff" : "#1c2128";
-            })
-            .attr("stroke-opacity", l => {
-              const s = (l.source as SimNode).id, t = (l.target as SimNode).id;
-              return s === d.id || t === d.id ? 1 : 0.05;
-            })
-            .attr("marker-end", l => {
-              const s = (l.source as SimNode).id, t = (l.target as SimNode).id;
-              return s === d.id || t === d.id ? "url(#arrow-highlight)" : "url(#arrow-default)";
-            });
+          const conn = new Set([d.id]);
+          links.forEach(l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; if (s === d.id) conn.add(t); if (t === d.id) conn.add(s); });
+          nodeG.attr("opacity", n => conn.has(n.id) ? 1 : 0.06);
+          link.attr("stroke", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return s === d.id || t === d.id ? "#58a6ff" : "#1c2128"; })
+            .attr("stroke-opacity", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return s === d.id || t === d.id ? 1 : 0.03; })
+            .attr("marker-end", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return s === d.id || t === d.id ? "url(#arrow-highlight)" : "url(#arrow-default)"; });
           tooltip.style("opacity", "1")
-            .html(`<strong>${d.data.label}</strong><br/><span style="color:#8b949e">${d.data.path}</span><br/>${d.data.language} · ${d.data.lineCount} lines · ${d.data.kind}${d.data.isEntryPoint ? " · <span style='color:#22c55e'>entry</span>" : ""}`)
-            .style("left", (ev.offsetX + 16) + "px")
-            .style("top", (ev.offsetY - 10) + "px");
+            .html(`<strong>${d.data.label}</strong><br/><span style="color:#8b949e">${d.data.path}</span><br/>${d.data.language} · ${d.data.lineCount} lines${d.data.isEntryPoint ? ' · <span style="color:#22c55e">entry</span>' : ""}`)
+            .style("left", (ev.offsetX + 16) + "px").style("top", (ev.offsetY - 10) + "px");
         })
-        .on("mouseout", function (_ev, d) {
+        .on("mouseout", function(_ev, d) {
+          d3.select(this).select(".hover-ring").attr("r", 0).attr("stroke-opacity", 0);
           const always = d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileIdRef.current;
           d3.select(this).select("text").attr("opacity", always ? 1 : 0);
           nodeG.attr("opacity", 1);
-          link.attr("stroke", l => l.data.isTypeOnly ? "#2d333b" : "#30363d")
-            .attr("stroke-opacity", 1)
-            .attr("marker-end", "url(#arrow-default)");
+          link.attr("stroke", l => l.data.isTypeOnly ? "#1c2128" : "#252c36").attr("stroke-opacity", 0.7).attr("marker-end", "url(#arrow-default)");
           tooltip.style("opacity", "0");
         })
-        .on("click", (_ev, d) => { onFileClickRef.current(d.data); });
+        .on("click", (_ev, d) => { onFileClickRef.current(d.data); })
+        .on("dblclick", function(ev, d) {
+          ev.stopPropagation();
+          if (!svgRef.current || !zoomRef.current || d.x == null || d.y == null) return;
+          const scale = 2.5;
+          svgRef.current.transition().duration(500).call(zoomRef.current.transform,
+            d3.zoomIdentity.translate(width / 2 - d.x * scale, height / 2 - d.y * scale).scale(scale));
+        });
 
-      // ── 8. Force simulation ────────────────────────────────────────────
+      // 8. Simulation
       const sim = d3.forceSimulation<SimNode>(nodes)
         .force("link", d3.forceLink<SimNode, SimLink>(links).id(d => d.id).distance(70).strength(0.5))
         .force("charge", d3.forceManyBody().strength(-200))
         .force("collision", d3.forceCollide<SimNode>().radius(d => getRadius(d) + 6))
-        .force("x", d3.forceX<SimNode>(d => (d.x ?? 0)).strength(0.08))
-        .force("y", d3.forceY<SimNode>(d => (d.y ?? 0)).strength(0.08))
+        .force("x", d3.forceX<SimNode>(d => d.x ?? 0).strength(0.08))
+        .force("y", d3.forceY<SimNode>(d => d.y ?? 0).strength(0.08))
         .force("center", d3.forceCenter(width / 2, height / 2).strength(0.02));
       simulationRef.current = sim;
 
       sim.on("tick", () => {
-        link
-          .attr("x1", d => (d.source as SimNode).x!)
-          .attr("y1", d => (d.source as SimNode).y!)
-          .attr("x2", d => (d.target as SimNode).x!)
-          .attr("y2", d => (d.target as SimNode).y!);
+        link.attr("x1", d => (d.source as SimNode).x!).attr("y1", d => (d.source as SimNode).y!)
+          .attr("x2", d => (d.target as SimNode).x!).attr("y2", d => (d.target as SimNode).y!);
         nodeG.attr("transform", d => `translate(${d.x ?? 0},${d.y ?? 0})`);
       });
 
       sim.on("end", () => {
-        // Folder backgrounds
+        // Folder cluster backgrounds — only render once, 4+ nodes, capped at 8 folders
         const byFolder = new Map<string, SimNode[]>();
-        for (const n of nodes) {
-          if (!byFolder.has(n.folder)) byFolder.set(n.folder, []);
-          byFolder.get(n.folder)!.push(n);
-        }
-        for (const [folder, fNodes] of byFolder) {
-          if (fNodes.length < 3) continue;
+        for (const n of nodes) { if (!byFolder.has(n.folder)) byFolder.set(n.folder, []); byFolder.get(n.folder)!.push(n); }
+        const topFolders = [...byFolder.entries()]
+          .filter(([, ns]) => ns.length >= 4)
+          .sort((a, b) => b[1].length - a[1].length)
+          .slice(0, 8);
+
+        for (const [folder, fNodes] of topFolders) {
           let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-          for (const n of fNodes) {
-            const r = getRadius(n);
-            x0 = Math.min(x0, (n.x ?? 0) - r); y0 = Math.min(y0, (n.y ?? 0) - r);
-            x1 = Math.max(x1, (n.x ?? 0) + r); y1 = Math.max(y1, (n.y ?? 0) + r);
-          }
+          for (const n of fNodes) { const r = getRadius(n); x0 = Math.min(x0, (n.x ?? 0) - r); y0 = Math.min(y0, (n.y ?? 0) - r); x1 = Math.max(x1, (n.x ?? 0) + r); y1 = Math.max(y1, (n.y ?? 0) + r); }
           if (!isFinite(x0)) continue;
-          const pad = 24, color = getDominantLanguageColor(fNodes);
-          folderBg.append("rect")
-            .attr("x", x0 - pad).attr("y", y0 - pad)
+          const pad = 16, color = getDominantLanguageColor(fNodes);
+          folderBg.append("rect").attr("x", x0 - pad).attr("y", y0 - pad)
             .attr("width", x1 - x0 + pad * 2).attr("height", y1 - y0 + pad * 2)
-            .attr("rx", 10).attr("fill", color).attr("fill-opacity", 0.06)
-            .attr("pointer-events", "none");
-          folderBg.append("text")
-            .attr("x", x0 - pad + 8).attr("y", y0 - pad + 16)
-            .text(folder === "/" ? "(root)" : folder)
-            .attr("fill", color).attr("font-size", "11px").attr("font-weight", "600")
-            .attr("font-family", "system-ui, sans-serif").attr("opacity", 0.7)
-            .attr("pointer-events", "none");
+            .attr("rx", 10).attr("fill", color).attr("fill-opacity", 0.04).attr("pointer-events", "none");
+          folderBg.append("text").attr("x", x0 - pad + 6).attr("y", y0 - pad + 14)
+            .text(trunc(folder === "/" ? "(root)" : folder, 30))
+            .attr("fill", color).attr("font-size", "10px").attr("font-weight", "600")
+            .attr("font-family", "system-ui, sans-serif").attr("opacity", 0.5).attr("pointer-events", "none");
         }
 
-        // Auto-fit
-        const b = (g.node() as SVGGElement)?.getBBox();
-        if (b && b.width > 0) {
-          const scale = 0.85 / Math.max(b.width / width, b.height / height);
-          const tx = width / 2 - (b.x + b.width / 2) * scale;
-          const ty = height / 2 - (b.y + b.height / 2) * scale;
-          svg.transition().duration(600).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+        // Auto-fit only once
+        if (!autoFittedRef.current) {
+          autoFittedRef.current = true;
+          const b = (g.node() as SVGGElement)?.getBBox();
+          if (b && b.width > 0) {
+            const scale = 0.85 / Math.max(b.width / width, b.height / height);
+            svg.transition().duration(600).call(zoom.transform,
+              d3.zoomIdentity.translate(width / 2 - (b.x + b.width / 2) * scale, height / 2 - (b.y + b.height / 2) * scale).scale(scale));
+          }
         }
       });
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error("FileGraph build error:", err);
+      console.error("FileGraph error:", err);
       setError(msg);
     }
 
-    return () => {
-      simulationRef.current?.stop();
-    };
+    return () => { simulationRef.current?.stop(); };
   }, [files, edges]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Search filter effect ────────────────────────────────────────────────────
+  // ── Search filter ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!nodeGRef.current || !linkRef.current) return;
     const q = searchQuery.toLowerCase().trim();
     if (!q) {
       nodeGRef.current.attr("opacity", 1);
-      linkRef.current.attr("stroke-opacity", 1);
+      linkRef.current.attr("stroke-opacity", 0.7);
       nodeGRef.current.select<SVGTextElement>("text").attr("opacity", (d: SimNode) =>
-        d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileIdRef.current ? 1 : 0
-      );
+        d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileIdRef.current ? 1 : 0);
       return;
     }
     nodeGRef.current.attr("opacity", (d: SimNode) =>
-      d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0.05
-    );
+      d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0.04);
     nodeGRef.current.select<SVGTextElement>("text").attr("opacity", (d: SimNode) =>
-      d.data.path.toLowerCase().includes(q) ? 1 : 0
-    );
-    linkRef.current.attr("stroke-opacity", 0.03);
-  }, [searchQuery]);
+      d.data.path.toLowerCase().includes(q) ? 1 : 0);
+    linkRef.current.attr("stroke-opacity", 0.02);
+  }, [searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="w-full relative" style={{ height: "75vh" }}>
-      {/* Legend */}
       <div className="absolute bottom-4 left-4 z-10 border rounded-xl p-3 text-xs space-y-1.5"
         style={{ background: "rgba(13,17,23,0.92)", borderColor: "#30363d", pointerEvents: "none" }}>
         <div className="font-semibold mb-2" style={{ color: "#8b949e" }}>Legend</div>
-        {[
-          { color: "#3178c6", label: "TypeScript" },
-          { color: "#f7df1e", label: "JavaScript", dark: true },
-          { color: "#7c3aed", label: "TSX" },
-          { color: "#ea580c", label: "JSX" },
-        ].map(({ color, label }) => (
+        {[{ color: "#3178c6", label: "TypeScript" }, { color: "#e8a400", label: "JavaScript" },
+          { color: "#7c3aed", label: "TSX" }, { color: "#ea580c", label: "JSX" }].map(({ color, label }) => (
           <div key={label} className="flex items-center gap-2">
             <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color }} />
             <span style={{ color: "#e6edf3" }}>{label}</span>
           </div>
         ))}
-        <div className="flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: "#22c55e" }} />
-          <span style={{ color: "#e6edf3" }}>Entry Point</span>
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full" style={{ background: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Entry Point</span></div>
+        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Test file</span></div>
+        <div className="flex items-center gap-2"><svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg><span style={{ color: "#e6edf3" }}>Config</span></div>
+        <div className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid #30363d", marginTop: "4px" }}>
+          <span className="w-3 h-0.5 rounded" style={{ background: "#f0883e" }} /><span style={{ color: "#e6edf3" }}>Selected</span>
         </div>
         <div className="flex items-center gap-2">
-          <span className="w-3 h-3 rounded-full flex-shrink-0 border border-dashed" style={{ borderColor: "#22c55e" }} />
-          <span style={{ color: "#e6edf3" }}>Test file</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg>
-          <span style={{ color: "#e6edf3" }}>Config file</span>
+          <span className="w-3 h-0.5 rounded" style={{ background: "#58a6ff" }} /><span style={{ color: "#e6edf3" }}>Hovered</span>
         </div>
       </div>
       {error && (

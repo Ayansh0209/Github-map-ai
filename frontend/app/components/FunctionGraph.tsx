@@ -19,6 +19,7 @@ interface FunctionGraphProps {
   commitSha: string;
   onFunctionNavigate: (fn: FunctionNodeDTO) => void;
   onBackToFileGraph: () => void;
+  onBackToFile?: () => void;
 }
 
 // ── Resolve function IDs to FunctionNodeDTO objects ───────────────────────────
@@ -49,6 +50,7 @@ export default function FunctionGraph({
   commitSha,
   onFunctionNavigate,
   onBackToFileGraph,
+  onBackToFile,
 }: FunctionGraphProps) {
   // Resolve callers and callees
   const { callers, callees } = useMemo(() => {
@@ -85,54 +87,52 @@ export default function FunctionGraph({
     <div className="w-full" style={{ minHeight: "75vh" }}>
       {/* ── Top bar: Back + Breadcrumb ────────────────────────────────────── */}
       <div
-        className="flex items-center gap-3 mb-4 px-2 py-2"
+        className="flex items-center gap-3 mb-4 px-2 py-2 flex-wrap"
         style={{ borderBottom: "1px solid #21262d" }}
       >
-        <button
-          id="back-to-file-graph-btn"
-          onClick={onBackToFileGraph}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80"
-          style={{
-            background: "#1c2128",
-            border: "1px solid #30363d",
-            color: "#8b949e",
-          }}
-        >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
+        {/* Back buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            id="back-to-file-graph-btn"
+            onClick={onBackToFileGraph}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80"
+            style={{ background: "#1c2128", border: "1px solid #30363d", color: "#8b949e" }}
           >
-            <path d="M19 12H5M12 19l-7-7 7-7" />
-          </svg>
-          Back to file graph
-        </button>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M19 12H5M12 19l-7-7 7-7" />
+            </svg>
+            Graph
+          </button>
+          {onBackToFile && (
+            <button
+              id="back-to-file-btn"
+              onClick={onBackToFile}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80"
+              style={{ background: "#1c2128", border: "1px solid #30363d", color: "#8b949e" }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M19 12H5M12 19l-7-7 7-7" />
+              </svg>
+              {shortFile}
+            </button>
+          )}
+        </div>
 
         {/* Breadcrumb */}
         <div className="flex items-center gap-1 text-xs overflow-hidden">
-          <span style={{ color: "#8b949e" }}>
+          <button onClick={onBackToFileGraph} className="hover:opacity-80 transition-opacity" style={{ color: "#8b949e" }}>
             {owner}/{repo}
-          </span>
+          </button>
           <span style={{ color: "#484f58" }}>›</span>
-          <span
-            style={{
-              color: "#8b949e",
-              fontFamily: "var(--font-geist-mono), monospace",
-            }}
+          <button
+            onClick={onBackToFile ?? onBackToFileGraph}
+            className="hover:opacity-80 transition-opacity truncate max-w-[200px]"
+            style={{ color: "#8b949e", fontFamily: "var(--font-geist-mono), monospace" }}
           >
             {selectedFunction.filePath}
-          </span>
+          </button>
           <span style={{ color: "#484f58" }}>›</span>
-          <span
-            style={{
-              color: "#e6edf3",
-              fontFamily: "var(--font-geist-mono), monospace",
-              fontWeight: 600,
-            }}
-          >
+          <span style={{ color: "#e6edf3", fontFamily: "var(--font-geist-mono), monospace", fontWeight: 600 }}>
             {selectedFunction.name}()
           </span>
         </div>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import InputBar from "./components/InputBar";
 import ProgressBar from "./components/ProgressBar";
 import FileGraph from "./components/FileGraph";
@@ -35,6 +35,7 @@ export default function Home() {
     useState<FunctionNodeDTO | null>(null);
   const [view, setView] = useState<ViewMode>("file-graph");
   const [searchQuery, setSearchQuery] = useState("");
+  const resetZoomRef = useRef<(() => void) | null>(null);
 
   const isLoading =
     status === "submitting" ||
@@ -117,8 +118,42 @@ export default function Home() {
 
   const handleResetView = useCallback(() => {
     setSearchQuery("");
-    // Force graph re-render by toggling a key (handled by FileGraph internally)
+    resetZoomRef.current?.();
   }, []);
+
+  const handleBackToFile = useCallback(() => {
+    setView("file-graph");
+    setSelectedFunction(null);
+    // selectedFile stays intact — DetailsPanel reopens automatically
+  }, []);
+
+  // ── URL param sync (state → URL) ──────────────────────────────────────────
+  useEffect(() => {
+    if (!result?.owner) return;
+    const params = new URLSearchParams();
+    params.set("repo", `${owner}/${repo}`);
+    if (selectedFile) params.set("file", selectedFile.id);
+    if (view === "function-graph" && selectedFunction) params.set("fn", selectedFunction.name);
+    window.history.pushState({}, "", `${window.location.pathname}?${params.toString()}`);
+  }, [owner, repo, selectedFile, selectedFunction, view, result]);
+
+  // ── popstate — browser back/forward ──────────────────────────────────────
+  useEffect(() => {
+    const handler = () => {
+      const params = new URLSearchParams(window.location.search);
+      const fileParam = params.get("file");
+      const fnParam = params.get("fn");
+      if (!fileParam) {
+        setSelectedFile(null); setSelectedFunction(null); setView("file-graph");
+      } else if (!fnParam) {
+        const f = fileGraph?.files.find(f => f.id === fileParam);
+        if (f) setSelectedFile(f);
+        setSelectedFunction(null); setView("file-graph");
+      }
+    };
+    window.addEventListener("popstate", handler);
+    return () => window.removeEventListener("popstate", handler);
+  }, [fileGraph]);
 
   const handleReset = useCallback(() => {
     reset();
@@ -293,6 +328,7 @@ export default function Home() {
                 repo={repo}
                 searchQuery={searchQuery}
                 selectedFileId={selectedFile?.id ?? null}
+                resetZoomRef={resetZoomRef}
               />
             ) : selectedFunction && functionFiles ? (
               <FunctionGraph
@@ -303,6 +339,7 @@ export default function Home() {
                 commitSha={commitSha}
                 onFunctionNavigate={handleFunctionNavigate}
                 onBackToFileGraph={handleBackToFileGraph}
+                onBackToFile={handleBackToFile}
               />
             ) : (
               <div

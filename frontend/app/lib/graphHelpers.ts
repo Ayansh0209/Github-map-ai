@@ -5,7 +5,7 @@
 
 const LANGUAGE_COLORS: Record<string, string> = {
   typescript: "#3178c6",
-  javascript: "#f7df1e",
+  javascript: "#e8a400",
   tsx: "#7c3aed",
   jsx: "#ea580c",
   json: "#6b7280",

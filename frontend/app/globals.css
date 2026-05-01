@@ -1,5 +1,10 @@
 @import "tailwindcss";
 
+/* Prevent layout shift when scrollbar appears/disappears (e.g. DetailsPanel open) */
+html {
+  scrollbar-gutter: stable;
+}
+
 /* ── Design System ─────────────────────────────────────────── */
 
 @theme inline {
