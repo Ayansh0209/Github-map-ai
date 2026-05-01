@@ -123,6 +123,15 @@ export default function DetailsPanel({
             {file.entryScore !== undefined && (
               <InfoRow label="Entry Score" value={file.entryScore.toString()} />
             )}
+            {file.cycleScore !== undefined && file.cycleScore > 0 && (
+              <InfoRow label="Cycle" value="⚠ Circular Dep" />
+            )}
+            {file.hubScore !== undefined && file.hubScore > 0 && (
+              <InfoRow label="Hub Score" value={file.hubScore.toString()} />
+            )}
+            {file.architecturalImportance !== undefined && file.architecturalImportance > 0 && (
+              <InfoRow label="Arch Weight" value={file.architecturalImportance.toString()} />
+            )}
           </div>
         </section>
 
@@ -132,12 +141,58 @@ export default function DetailsPanel({
             <SectionHeader>Entry Scoring Reasons</SectionHeader>
             <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#0d1117", border: "1px solid #30363d" }}>
               <ul className="list-disc list-inside space-y-1">
-                {file.entryReasons.map((reason, i) => (
+                {[...file.entryReasons]
+                  .sort((a, b) => {
+                    const matchA = a.match(/^([+-]?\d+)/);
+                    const matchB = b.match(/^([+-]?\d+)/);
+                    const valA = matchA ? Math.abs(parseInt(matchA[1], 10)) : 0;
+                    const valB = matchB ? Math.abs(parseInt(matchB[1], 10)) : 0;
+                    return valB - valA;
+                  })
+                  .map((reason, i) => (
                   <li key={i} style={{ color: reason.includes("-") ? "#f85149" : "#3fb950" }}>
                     <span style={{ color: "#c9d1d9" }}>{reason}</span>
                   </li>
                 ))}
               </ul>
+            </div>
+          </section>
+        )}
+
+        {/* ── TEST INTELLIGENCE ───────────────────────────────────────────── */}
+        {file.kind === "test" && (
+          <section>
+            <SectionHeader>Test Intelligence</SectionHeader>
+            <div className="rounded-lg p-3 text-xs space-y-3" style={{ background: "#0d1117", border: "1px dashed #3fb950" }}>
+              <div className="flex gap-4">
+                <div>
+                  <span style={{ color: "#8b949e", fontWeight: 600 }}>TEST SUITES </span>
+                  <span style={{ color: "#e6edf3", fontWeight: 700 }}>({file.testSuites?.length || 0})</span>
+                </div>
+                <div>
+                  <span style={{ color: "#8b949e", fontWeight: 600 }}>TEST CASES </span>
+                  <span style={{ color: "#e6edf3", fontWeight: 700 }}>({file.testCases?.length || 0})</span>
+                </div>
+              </div>
+
+              {outgoing.filter(e => e.isTestCoverage).length > 0 && (
+                <div>
+                  <div style={{ color: "#8b949e", fontWeight: 600, marginBottom: "4px" }}>COVERS:</div>
+                  <ul className="space-y-1">
+                    {outgoing.filter(e => e.isTestCoverage).map((e, i) => (
+                      <li key={i}>
+                        <button
+                          className="w-full text-left truncate hover:underline"
+                          style={{ color: "#58a6ff", fontFamily: "var(--font-geist-mono), monospace" }}
+                          onClick={() => onFileNavigate(e.target)}
+                        >
+                          {e.target}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -206,7 +261,7 @@ export default function DetailsPanel({
                       color: "#e6edf3",
                     }}
                   >
-                    {getKindBadge(fn.kind)}
+                    {fn.name.startsWith("describe") ? "suite" : (fn.name.startsWith("it") || fn.name.startsWith("test(")) ? "test case" : getKindBadge(fn.kind)}
                   </span>
 
                   {/* Line range */}
@@ -281,6 +336,22 @@ export default function DetailsPanel({
                         type
                       </span>
                     )}
+                    {e.isCircular && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(248,81,73,0.1)", color: "#f85149" }}
+                      >
+                        cycle
+                      </span>
+                    )}
+                    {e.isTestCoverage && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(34,197,94,0.1)", color: "#22c55e" }}
+                      >
+                        test
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -315,6 +386,22 @@ export default function DetailsPanel({
                     >
                       {e.source}
                     </span>
+                    {e.isCircular && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(248,81,73,0.1)", color: "#f85149" }}
+                      >
+                        cycle
+                      </span>
+                    )}
+                    {e.isTestCoverage && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(34,197,94,0.1)", color: "#22c55e" }}
+                      >
+                        test
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -425,6 +512,14 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 
 function getKindBadgeColor(kind: string): string {
   switch (kind) {
+    case "component": return "rgba(6,182,212,0.2)";
+    case "hook": return "rgba(244,63,94,0.2)";
+    case "reducer": return "rgba(168,85,247,0.2)";
+    case "route-handler":
+    case "middleware": return "rgba(16,185,129,0.2)";
+    case "test": return "rgba(34,197,94,0.2)";
+    case "context-provider": return "rgba(59,130,246,0.2)";
+    case "callback": return "rgba(139,148,158,0.2)";
     case "async":
       return "rgba(136,46,224,0.25)";
     case "arrow":

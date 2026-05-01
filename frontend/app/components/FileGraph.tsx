@@ -195,10 +195,10 @@ export default function FileGraph({
       // 5. Edges
       const link = g.append("g")
         .selectAll<SVGLineElement, SimLink>("line").data(links).join("line")
-        .attr("stroke", d => d.data.isTypeOnly ? "#1c2128" : "#252c36")
-        .attr("stroke-width", d => d.data.isTypeOnly ? 0.5 : Math.min(3, Math.max(1, (d.data.symbols?.length || 1) * 0.4)))
-        .attr("stroke-dasharray", d => d.data.kind === "dynamic" ? "5,3" : "none")
-        .attr("stroke-opacity", 0.7).attr("marker-end", "url(#arrow-default)");
+        .attr("stroke", d => d.data.isCircular ? "#f85149" : d.data.isTypeOnly ? "#1c2128" : "#252c36")
+        .attr("stroke-width", d => d.data.isTypeOnly ? 0.5 : Math.max(1, (d.data.weight || 1) * 0.8))
+        .attr("stroke-dasharray", d => d.data.isCircular ? "6,4" : d.data.kind === "dynamic" ? "5,3" : "none")
+        .attr("stroke-opacity", d => d.data.isCircular ? 1 : 0.7).attr("marker-end", "url(#arrow-default)");
       linkRef.current = link;
 
       // 6. Nodes
@@ -261,7 +261,7 @@ export default function FileGraph({
           const conn = new Set([d.id]);
           links.forEach(l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; if (s === d.id) conn.add(t); if (t === d.id) conn.add(s); });
           nodeG.attr("opacity", n => conn.has(n.id) ? 1 : 0.06);
-          link.attr("stroke", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return s === d.id || t === d.id ? "#58a6ff" : "#1c2128"; })
+          link.attr("stroke", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return l.data.isCircular ? "#f85149" : (s === d.id || t === d.id ? "#58a6ff" : "#1c2128"); })
             .attr("stroke-opacity", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return s === d.id || t === d.id ? 1 : 0.03; })
             .attr("marker-end", l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; return s === d.id || t === d.id ? "url(#arrow-highlight)" : "url(#arrow-default)"; });
           tooltip.style("opacity", "1")
@@ -273,7 +273,7 @@ export default function FileGraph({
           const always = d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileIdRef.current;
           d3.select(this).select("text").attr("opacity", always ? 1 : 0);
           nodeG.attr("opacity", 1);
-          link.attr("stroke", l => l.data.isTypeOnly ? "#1c2128" : "#252c36").attr("stroke-opacity", 0.7).attr("marker-end", "url(#arrow-default)");
+          link.attr("stroke", l => l.data.isCircular ? "#f85149" : l.data.isTypeOnly ? "#1c2128" : "#252c36").attr("stroke-opacity", l => l.data.isCircular ? 1 : 0.7).attr("marker-end", "url(#arrow-default)");
           tooltip.style("opacity", "0");
         })
         .on("click", (_ev, d) => { onFileClickRef.current(d.data); })
@@ -287,11 +287,30 @@ export default function FileGraph({
 
       // 8. Simulation
       const sim = d3.forceSimulation<SimNode>(nodes)
-        .force("link", d3.forceLink<SimNode, SimLink>(links).id(d => d.id).distance(70).strength(0.5))
-        .force("charge", d3.forceManyBody().strength(-200))
-        .force("collision", d3.forceCollide<SimNode>().radius(d => getRadius(d) + 6))
-        .force("x", d3.forceX<SimNode>(d => d.x ?? 0).strength(0.08))
-        .force("y", d3.forceY<SimNode>(d => d.y ?? 0).strength(0.08))
+        .force("link", d3.forceLink<SimNode, SimLink>(links).id(d => d.id)
+            .distance(d => {
+                const s = d.source as SimNode;
+                const t = d.target as SimNode;
+                if (s.data.isEntryPoint || t.data.isEntryPoint) return 180;
+                if (s.isHub || t.isHub) return 120;
+                return 70;
+            })
+            .strength(0.5)
+        )
+        .force("charge", d3.forceManyBody<SimNode>().strength(d => {
+            if (d.data.isEntryPoint) return -800;
+            if (d.isHub) return -500;
+            if (d.data.kind === "test") return -300;
+            return -200;
+        }))
+        .force("collision", d3.forceCollide<SimNode>().radius(d => {
+            let r = getRadius(d) + 12;
+            if (d.data.isEntryPoint) r += 40;
+            else if (d.isHub) r += 20;
+            return r;
+        }).iterations(3))
+        .force("x", d3.forceX<SimNode>(d => d.x ?? 0).strength(d => d.data.kind === "test" ? 0.02 : 0.08))
+        .force("y", d3.forceY<SimNode>(d => d.y ?? 0).strength(d => d.data.kind === "test" ? 0.02 : 0.08))
         .force("center", d3.forceCenter(width / 2, height / 2).strength(0.02));
       simulationRef.current = sim;
 
@@ -377,6 +396,7 @@ export default function FileGraph({
         ))}
         <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full" style={{ background: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Entry Point</span></div>
         <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Test file</span></div>
+        <div className="flex items-center gap-2"><span className="w-3 h-0.5" style={{ background: "#f85149", borderTop: "2px dashed #f85149" }} /><span style={{ color: "#e6edf3" }}>Circular Dep</span></div>
         <div className="flex items-center gap-2"><svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg><span style={{ color: "#e6edf3" }}>Config</span></div>
         <div className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid #30363d", marginTop: "4px" }}>
           <span className="w-3 h-0.5 rounded" style={{ background: "#f0883e" }} /><span style={{ color: "#e6edf3" }}>Selected</span>

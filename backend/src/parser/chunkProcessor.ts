@@ -9,7 +9,7 @@ import { Project, ScriptTarget, ModuleKind } from "ts-morph";
 import { ParseDecision } from "../processing/sizeHandler";
 import { FileNode, ImportEdge, FunctionNode, FileKind } from "../models/schema";
 import { extractFileLevel } from "./fileLevel";
-import { extractFunctionLevel } from "./functionLevel";
+import { extractFunctionLevel, extractTestMetadata } from "./functionLevel";
 import { ImportResolver } from "./importResolver";
 
 const CHUNK_SIZE = 50;
@@ -31,14 +31,34 @@ function sleep(ms: number): Promise<void> {
 
 // ── File kind / entry point helpers ──────────────────────────────────────────
 
-function detectFileKind(relativePath: string): FileKind {
+function detectFileKind(relativePath: string, sourceFile?: any): FileKind {
     const filename = path.basename(relativePath).toLowerCase();
+    
     if (filename.endsWith(".d.ts")) return "declaration";
+    
+    const pathSegments = relativePath.split(/[\\/]/);
     if (
         filename.includes(".test.") ||
         filename.includes(".spec.") ||
-        filename.includes("__tests__")
+        pathSegments.includes("__tests__") ||
+        pathSegments.includes("__mocks__") ||
+        pathSegments.includes("test") ||
+        pathSegments.includes("tests") ||
+        filename === "setuptests.ts" || filename === "setuptests.js" ||
+        filename === "setup.ts" || filename === "setup.js" ||
+        filename === "teardown.ts" || filename === "teardown.js"
     ) return "test";
+
+    if (filename.endsWith(".jsx") || filename.endsWith(".tsx")) {
+        if (sourceFile) {
+            for (const [name] of sourceFile.getExportedDeclarations()) {
+                if (/^[A-Z]/.test(name)) {
+                    return "ui";
+                }
+            }
+        }
+    }
+
     if (
         filename.startsWith("jest.config") ||
         filename.startsWith("vite.config") ||
@@ -54,6 +74,7 @@ function detectFileKind(relativePath: string): FileKind {
         filename.startsWith("tailwind.config") ||
         filename.startsWith("postcss.config")
     ) return "config";
+    
     return "source";
 }
 
@@ -203,6 +224,16 @@ async function processChunk(
                         ? "javascript"
                         : "unknown";
 
+            const kind = detectFileKind(decision.relativePath, sourceFile);
+
+            let testSuites: string[] = [];
+            let testCases: string[] = [];
+            if (kind === "test") {
+                const metadata = extractTestMetadata(sourceFile);
+                testSuites = metadata.testSuites;
+                testCases = metadata.testCases;
+            }
+
             fileNodes.push({
                 id:               decision.relativePath,
                 label:            path.basename(decision.relativePath),
@@ -211,12 +242,17 @@ async function processChunk(
                 sizeBytes:        decision.sizeBytes,
                 lineCount:        countLines(decision.absolutePath),
                 parseStatus:      decision.mode === "skip" ? "skipped" : decision.mode,
-                kind:             detectFileKind(decision.relativePath),
+                kind,
                 // isEntryPoint is set to false here — entryScorer in builder.ts overwrites it
                 isEntryPoint:     false,
                 functions,
                 externalImports:  [...new Set(confirmedExternal)],
                 unresolvedImports,
+                testSuites,
+                testCases,
+                cycleScore: undefined,
+                hubScore: undefined,
+                architecturalImportance: undefined,
             });
 
         } catch (err) {

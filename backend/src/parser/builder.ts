@@ -15,6 +15,7 @@ import {
     FunctionFilePayload,
 } from "../models/schema";
 import { applyEntryScoring } from "./entryScorer";
+import { applyGraphAnalytics } from "./graphAnalytics";
 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -101,6 +102,61 @@ export function buildGraph(input: BuilderInput): BuilderOutput {
         startupSignals: startupSignals ?? new Map(),
         routeHandlers:  routeHandlers  ?? new Map(),
     });
+
+    // ── Step 2.6: Mark Test Coverage Edges ───────────────────────────────────
+    for (const edge of validImportEdges) {
+        const sourceFile = fileNodes.find(f => f.id === edge.source);
+        if (sourceFile && sourceFile.kind === "test") {
+            edge.isTestCoverage = true;
+            // Also link the function nodes if needed, but file-level coverage is here.
+        }
+    }
+
+    // ── Step 2.7: Graph Analytics (SCC & Weighting) ─────────────────────────
+    const analyticsStats = applyGraphAnalytics(fileNodes, validImportEdges);
+    console.log(`[builder] graph analytics: found ${analyticsStats.cycleCount} circular dependency cycles containing ${analyticsStats.filesInCycles} files`);
+
+    // ── Step 2.8: Compute scores on each FileNode ────────────────────────────
+    const inDegree = new Map<string, number>();
+    const outDegree = new Map<string, number>();
+    for (const edge of validImportEdges) {
+        outDegree.set(edge.source, (outDegree.get(edge.source) || 0) + 1);
+        inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
+    }
+
+    const totalFiles = fileNodes.length;
+    for (const file of fileNodes) {
+        let cycleScore = 0;
+        for (const edge of validImportEdges) {
+            if (edge.isCircular === true && (edge.source === file.id || edge.target === file.id)) {
+                cycleScore++;
+            }
+        }
+
+        const inD = inDegree.get(file.id) ?? 0;
+        const outD = outDegree.get(file.id) ?? 0;
+        let hubScore = ((inD * 2 + outD) / totalFiles) * 100;
+        hubScore = Math.round(hubScore * 100) / 100;
+
+        const entry = file.isEntryPoint ? 30 : 0;
+        const cycle = cycleScore * 5;
+        let architecturalImportance = hubScore + entry + cycle;
+        if (architecturalImportance > 100) architecturalImportance = 100;
+        architecturalImportance = Math.round(architecturalImportance * 100) / 100;
+
+        file.cycleScore = cycleScore;
+        file.hubScore = hubScore;
+        file.architecturalImportance = architecturalImportance;
+    }
+
+    const top5 = [...fileNodes]
+        .sort((a, b) => (b.architecturalImportance ?? 0) - (a.architecturalImportance ?? 0))
+        .slice(0, 5);
+
+    console.log("[builder] top 5 by architectural importance:");
+    top5.forEach(f =>
+        console.log(`  ${f.id} — importance: ${f.architecturalImportance} hub: ${f.hubScore} entry: ${f.isEntryPoint}`)
+    );
 
     // ── Step 3: Build function ID map ─────────────────────────────────────────
     // maps function name → array of FunctionNode IDs

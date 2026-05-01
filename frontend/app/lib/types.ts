@@ -33,6 +33,11 @@ export interface FileNodeDTO {
   unresolvedImports: string[];
   entryScore?: number;
   entryReasons?: string[];
+  testSuites?: string[];
+  testCases?: string[];
+  cycleScore?: number;
+  hubScore?: number;
+  architecturalImportance?: number;
 }
 
 export interface ImportEdgeDTO {
@@ -41,6 +46,9 @@ export interface ImportEdgeDTO {
   kind: "static" | "dynamic" | "re-export";
   symbols: string[];
   isTypeOnly: boolean;
+  weight?: number;
+  isCircular?: boolean;
+  isTestCoverage?: boolean;
 }
 
 export interface FileGraphPayload {
@@ -61,11 +69,13 @@ export interface FunctionNodeDTO {
   startLine: number;
   endLine: number;
   isExported: boolean;
-  kind: "function" | "arrow" | "method" | "constructor" | "getter" | "setter" | "async" | "unknown";
+  isAsync?: boolean;
+  kind: "function" | "arrow" | "method" | "constructor" | "getter" | "setter" | "async" | "component" | "hook" | "reducer" | "route-handler" | "middleware" | "test" | "utility" | "callback" | "context-provider" | "unknown";
   visibility?: "public" | "private" | "protected";
   parentId?: string;
   calls: string[];       // FunctionNode IDs this calls
   calledBy: string[];    // FunctionNode IDs that call this
+  testCoveredFiles?: string[];
   analysisConfidence: "high" | "medium" | "low";
 }
 
