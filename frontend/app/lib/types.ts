@@ -148,3 +148,37 @@ export interface SearchResponse {
   total: number;
   results: SearchResultItem[];
 }
+
+// ── Diagnose (Issue Mapping) types ────────────────────────────────────────────
+
+export interface CandidateFile {
+  filePath: string;
+  score: number;            // 0-100 confidence
+  matchedReasons: string[]; // why the engine picked this file
+}
+
+export interface CandidateFunction {
+  functionId: string;
+  filePath: string;
+  score: number;
+  matchedReasons: string[];
+}
+
+export interface IssueMappingResult {
+  issueText: string;
+  matchedKeywords: string[];
+  topFiles: CandidateFile[];
+  topFunctions: CandidateFunction[];
+  confidenceScore: number;
+}
+
+/**
+ * Attached to a selected node when it was navigated from a Diagnose result.
+ * Shown in DetailsPanel as the issue relevance sidebar context.
+ */
+export interface IssueContext {
+  issueText: string;
+  relevanceScore: number;
+  matchedReasons: string[];
+  matchedKeywords: string[];
+}

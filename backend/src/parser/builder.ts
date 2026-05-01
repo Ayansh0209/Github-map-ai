@@ -376,7 +376,7 @@ export function buildGraph(input: BuilderInput): BuilderOutput {
     console.log(`[builder] split into 1 file_graph + ${functionFiles.size} function files`);
 
     // ── Step 10: Build search index ────────────────────────────────────────────
-    const searchIndex = buildSearchIndex(fileNodes, allFunctions);
+    const searchIndex = buildSearchIndex(fileNodes, allFunctions, validImportEdges);
 
     return { graphData, fileGraph, functionFiles, searchIndex };
 }

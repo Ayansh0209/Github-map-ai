@@ -5,6 +5,7 @@ import type {
   ImportEdgeDTO,
   FunctionNodeDTO,
   FunctionFilePayload,
+  IssueContext,
 } from "../lib/types";
 import {
   makeGitHubFileLink,
@@ -22,6 +23,7 @@ interface DetailsPanelProps {
   onClose: () => void;
   onFileNavigate: (fileId: string) => void;
   onFunctionClick: (fn: FunctionNodeDTO) => void;
+  issueContext?: IssueContext | null;
 }
 
 export default function DetailsPanel({
@@ -34,6 +36,7 @@ export default function DetailsPanel({
   onClose,
   onFileNavigate,
   onFunctionClick,
+  issueContext,
 }: DetailsPanelProps) {
   if (!file) return null;
 
@@ -104,6 +107,45 @@ export default function DetailsPanel({
 
       {/* Body */}
       <div className="p-4 space-y-5">
+        {issueContext && (
+          <section>
+            <div className="rounded-xl p-3 space-y-2.5"
+              style={{ background: "rgba(240,173,0,0.06)", border: "1px solid rgba(240,173,0,0.25)" }}>
+              <div className="flex items-center gap-2">
+                <span className="text-base">🩺</span>
+                <span className="text-xs font-semibold" style={{ color: "#f0ad00" }}>Diagnose Relevance</span>
+                <span className="ml-auto text-[11px] font-bold px-2 py-0.5 rounded"
+                  style={{ background: "rgba(240,173,0,0.15)", color: "#f0ad00" }}>
+                  {issueContext.relevanceScore}%
+                </span>
+              </div>
+              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#30363d" }}>
+                <div className="h-full rounded-full transition-all duration-500" style={{
+                  width: `${issueContext.relevanceScore}%`,
+                  background: issueContext.relevanceScore >= 70 ? "#22c55e" : issueContext.relevanceScore >= 40 ? "#f0ad00" : "#f85149",
+                }} />
+              </div>
+              <p className="text-[11px] italic" style={{ color: "#8b949e" }}>"{issueContext.issueText}"</p>
+              {issueContext.matchedKeywords.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {issueContext.matchedKeywords.slice(0, 8).map((kw, i) => (
+                    <span key={i} className="px-1.5 py-0.5 rounded-full text-[10px]"
+                      style={{ background: "rgba(88,166,255,0.1)", color: "#58a6ff", border: "1px solid rgba(88,166,255,0.2)" }}>
+                      {kw}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {issueContext.matchedReasons.length > 0 && (
+                <div className="space-y-1">
+                  {issueContext.matchedReasons.slice(0, 3).map((r, i) => (
+                    <div key={i} className="text-[10px]" style={{ color: "#484f58" }}>↳ {r}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
         {/* File info */}
         <section>
           <SectionHeader>File Info</SectionHeader>

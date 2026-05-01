@@ -29,6 +29,7 @@ export interface SearchOptions {
     kind?: string;           // FileKind or FunctionKind value
     packageName?: string;    // workspace package filter
     limit?: number;          // max results (default: 50)
+    scoreThreshold?: number; // minimum score to return (0-100)
 }
 
 // ── Fuzzy matching ────────────────────────────────────────────────────────────
@@ -46,14 +47,21 @@ export interface SearchOptions {
  */
 function tokenSimilarity(query: string, target: string): number {
     if (query === target) return 1.0;
+    
+    // If query is very short, exact or startsWith is required (prevent false fuzzy positives)
+    if (query.length <= 3) {
+        if (target.startsWith(query)) return 0.8;
+        return 0;
+    }
+
     if (target.startsWith(query)) return 0.9;
     if (target.includes(query)) return 0.7;
 
-    // Only attempt fuzzy matching for short-ish tokens (avoid O(n²) on long strings)
-    if (query.length <= 12 && target.length <= 20) {
+    // Fuzzy matching for short-ish tokens
+    if (query.length <= 15 && target.length <= 25) {
         const dist = levenshteinDistance(query, target);
-        if (dist <= 1) return 0.5;
-        if (dist <= 2 && query.length >= 4) return 0.3;
+        if (dist === 1) return 0.6;
+        if (dist === 2 && query.length >= 5) return 0.4;
     }
 
     return 0;
@@ -135,7 +143,7 @@ export function searchIndex(
     query: string,
     options: SearchOptions = {},
 ): SearchResult[] {
-    const { type, kind, packageName, limit = 50 } = options;
+    const { type, kind, packageName, limit = 50, scoreThreshold = 0 } = options;
     const queryTokens = tokenizeQuery(query);
 
     if (queryTokens.length === 0) return [];
@@ -150,7 +158,7 @@ export function searchIndex(
 
         // ── Score each query token against entry tokens ───────────────────────
         let totalScore = 0;
-        const matchedTokens: string[] = [];
+        const matchedTokens = new Set<string>();
 
         for (const qt of queryTokens) {
             let bestTokenScore = 0;
@@ -163,29 +171,60 @@ export function searchIndex(
 
             if (bestTokenScore > 0) {
                 totalScore += bestTokenScore;
-                matchedTokens.push(qt);
+                matchedTokens.add(qt);
             }
         }
 
-        // All query tokens must match at least partially (AND semantics)
-        if (matchedTokens.length < queryTokens.length) continue;
+        // All query tokens must match at least partially (AND semantics) for exact searches,
+        // but for natural language issues we want a relaxed OR with strong threshold
+        // We require at least 50% of query tokens to match to consider it.
+        const matchRatio = matchedTokens.size / queryTokens.length;
+        if (matchRatio < 0.5) continue;
 
-        // Normalize to 0–100 scale
-        let score = (totalScore / queryTokens.length) * 80;
+        // Base token score normalized to 60 points max
+        let score = (totalScore / queryTokens.length) * 60;
 
-        // ── Bonus signals ─────────────────────────────────────────────────────
+        // ── High Priority Boosts: Path, Symbol, Export similarity ─────────────
         const nameLower = entry.name.toLowerCase();
         const queryLower = query.toLowerCase().trim();
 
-        if (nameLower === queryLower) score += 20;  // exact name match
-        else if (nameLower.includes(queryLower)) score += 10; // name contains query
+        // Exact symbol/file name match
+        if (nameLower === queryLower) score += 30;  
+        // Name starts with or ends with query (strong path/symbol relevance)
+        else if (nameLower.startsWith(queryLower) || nameLower.endsWith(queryLower)) score += 15;
+        // Name contains query
+        else if (nameLower.includes(queryLower)) score += 10; 
 
-        if (entry.isEntryPoint) score += 5; // entry points are more relevant
+        // If the query contains file path slashes and matches the filePath
+        if (queryLower.includes("/") && entry.filePath.toLowerCase().includes(queryLower)) {
+            score += 20;
+        }
+
+        // ── Medium Priority Boosts: Usage, Test references ────────────────────
+        if (entry.usageCount !== undefined && entry.usageCount > 0) {
+            // Logarithmic boost for usage: max 10 points
+            score += Math.min(10, Math.log1p(entry.usageCount) * 2);
+        }
+
+        if (entry.type === "test" || entry.kind === "test") {
+            // Tests have medium priority if tokens match strongly
+            if (matchRatio === 1) score += 5;
+        }
+
+        // ── Low Priority Boosts: Hub Score, Entry Score ───────────────────────
+        if (entry.isEntryPoint) score += 3;
+        if (entry.hubScore !== undefined && entry.hubScore > 0) {
+            // Very small boost based on hub score (max 5 points)
+            score += Math.min(5, (entry.hubScore / 100) * 5);
+        }
+
+        // Apply penalty for dead code
+        if (entry.isDeadCode) score -= 15;
 
         score = Math.min(100, Math.round(score * 10) / 10);
 
-        if (score > 0) {
-            results.push({ entry, score, matchedTokens });
+        if (score >= scoreThreshold && score > 0) {
+            results.push({ entry, score, matchedTokens: [...matchedTokens] });
         }
     }
 

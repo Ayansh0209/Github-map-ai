@@ -18,7 +18,8 @@
 import type {
     SearchIndex,
     IssueMappingResult,
-    IssueMappingCandidate,
+    CandidateFile,
+    CandidateFunction,
     FileNode,
 } from "../models/schema";
 import { searchIndex as runSearch } from "../search/queryEngine";
@@ -48,142 +49,134 @@ const STOPWORDS = new Set([
  */
 function extractQueryTokens(query: string): string[] {
     const raw = query
-        .toLowerCase()
-        .replace(/[^a-z0-9_\-./\\@#]/g, " ") // keep code-relevant characters
+        .replace(/[^a-zA-Z0-9_\-./\\@#:]/g, " ") // keep code-relevant characters, including colons for module/function hints
         .split(/\s+/)
-        .filter(t => t.length > 1 && !STOPWORDS.has(t));
+        .filter(t => t.length > 1 && !STOPWORDS.has(t.toLowerCase()));
 
-    return [...new Set(raw)];
+    const expanded = new Set<string>();
+
+    for (const token of raw) {
+        expanded.add(token.toLowerCase());
+        
+        // If camelCase or PascalCase, split it
+        if (/^[a-z]+[A-Z][a-zA-Z]*$/.test(token) || /^[A-Z][a-z]+[A-Z][a-zA-Z]*$/.test(token)) {
+            const parts = token.replace(/([a-z])([A-Z])/g, "$1 $2").split(" ");
+            for (const p of parts) if (p.length > 1) expanded.add(p.toLowerCase());
+        }
+
+        // If path-like, split by slashes
+        if (token.includes("/") || token.includes("\\")) {
+            const parts = token.split(/[/\\.]/);
+            for (const p of parts) if (p.length > 1) expanded.add(p.toLowerCase());
+        }
+    }
+
+    return [...expanded];
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-/**
- * Map a query (issue title, error message, etc.) to relevant code locations.
- *
- * @param query       Free-text query string
- * @param index       Pre-built search index
- * @param fileNodes   Full list of file nodes (for architectural scoring)
- * @param maxResults  Maximum candidates to return (default: 20)
- */
 export function mapIssueToCode(
     query: string,
     index: SearchIndex,
-    fileNodes: FileNode[],
-    maxResults = 20,
+    maxResults = 10,
 ): IssueMappingResult {
     const tokens = extractQueryTokens(query);
 
     if (tokens.length === 0) {
         return {
-            query,
-            candidates: [],
-            hotspots: [],
-            relevantSymbols: [],
-            totalMatches: 0,
+            issueText: query,
+            matchedKeywords: [],
+            topFiles: [],
+            topFunctions: [],
+            confidenceScore: 0,
         };
     }
 
     // ── Run search across all types ───────────────────────────────────────────
-    // Search for files, exports, and tests separately then merge
-    const fileResults   = runSearch(index, tokens.join(" "), { type: "file",   limit: maxResults * 2 });
-    const exportResults = runSearch(index, tokens.join(" "), { type: "export", limit: maxResults });
-    const testResults   = runSearch(index, tokens.join(" "), { type: "test",   limit: maxResults });
-
-    // ── Build file node lookup ────────────────────────────────────────────────
-    const fileNodeMap = new Map<string, FileNode>();
-    for (const f of fileNodes) fileNodeMap.set(f.id, f);
+    const fileResults   = runSearch(index, tokens.join(" "), { type: "file",   limit: maxResults * 2, scoreThreshold: 20 });
+    const exportResults = runSearch(index, tokens.join(" "), { type: "export", limit: maxResults * 2, scoreThreshold: 20 });
+    const testResults   = runSearch(index, tokens.join(" "), { type: "test",   limit: maxResults,     scoreThreshold: 20 });
 
     // ── Aggregate scores per file ─────────────────────────────────────────────
-    const candidateMap = new Map<string, {
-        matchScore: number;
-        matchReasons: string[];
-        functions: Set<string>;
+    const candidateFileMap = new Map<string, {
+        score: number;
+        reasons: string[];
     }>();
 
-    // File matches
     for (const r of fileResults) {
         const filePath = r.entry.filePath;
-        const existing = candidateMap.get(filePath) ?? {
-            matchScore: 0, matchReasons: [], functions: new Set(),
-        };
-        existing.matchScore += r.score;
-        existing.matchReasons.push(`file match: "${r.matchedTokens.join(", ")}" (+${r.score})`);
-        candidateMap.set(filePath, existing);
+        const existing = candidateFileMap.get(filePath) ?? { score: 0, reasons: [] };
+        existing.score += r.score;
+        existing.reasons.push(`file match: "${r.matchedTokens.join(", ")}" (+${Math.round(r.score)})`);
+        candidateFileMap.set(filePath, existing);
     }
 
-    // Export/function matches — boost the file they belong to
+    // ── Aggregate scores per function ─────────────────────────────────────────
+    const candidateFunctionMap = new Map<string, {
+        filePath: string;
+        score: number;
+        reasons: string[];
+    }>();
+
     for (const r of exportResults) {
-        const filePath = r.entry.filePath;
-        const existing = candidateMap.get(filePath) ?? {
-            matchScore: 0, matchReasons: [], functions: new Set(),
+        const funcId = r.entry.id;
+        const existing = candidateFunctionMap.get(funcId) ?? {
+            filePath: r.entry.filePath,
+            score: 0,
+            reasons: [],
         };
-        existing.matchScore += r.score * 0.8; // slightly lower weight than direct file match
-        existing.matchReasons.push(`export "${r.entry.name}" matched (+${Math.round(r.score * 0.8)})`);
-        existing.functions.add(r.entry.name);
-        candidateMap.set(filePath, existing);
+        existing.score += r.score;
+        existing.reasons.push(`export match: "${r.entry.name}" (+${Math.round(r.score)})`);
+        candidateFunctionMap.set(funcId, existing);
+
+        // Boost the parent file as well
+        const fExisting = candidateFileMap.get(r.entry.filePath) ?? { score: 0, reasons: [] };
+        fExisting.score += r.score * 0.8; 
+        fExisting.reasons.push(`contains matching export "${r.entry.name}" (+${Math.round(r.score * 0.8)})`);
+        candidateFileMap.set(r.entry.filePath, fExisting);
     }
 
-    // Test matches — boost covered files
     for (const r of testResults) {
         const filePath = r.entry.filePath;
-        const existing = candidateMap.get(filePath) ?? {
-            matchScore: 0, matchReasons: [], functions: new Set(),
-        };
-        existing.matchScore += r.score * 0.5;
-        existing.matchReasons.push(`test "${r.entry.name}" matched (+${Math.round(r.score * 0.5)})`);
-        candidateMap.set(filePath, existing);
-    }
-
-    // ── Apply architectural importance boost ──────────────────────────────────
-    for (const [filePath, data] of candidateMap) {
-        const node = fileNodeMap.get(filePath);
-        if (node) {
-            const archBoost = Math.min(20, (node.architecturalImportance ?? 0) * 0.3);
-            if (archBoost > 0) {
-                data.matchScore += archBoost;
-                data.matchReasons.push(`architectural importance boost (+${Math.round(archBoost)})`);
-            }
-        }
+        const existing = candidateFileMap.get(filePath) ?? { score: 0, reasons: [] };
+        existing.score += r.score * 0.5;
+        existing.reasons.push(`test coverage match: "${r.entry.name}" (+${Math.round(r.score * 0.5)})`);
+        candidateFileMap.set(filePath, existing);
     }
 
     // ── Build ranked candidates ───────────────────────────────────────────────
-    const candidates: IssueMappingCandidate[] = [...candidateMap.entries()]
-        .map(([filePath, data]) => {
-            const node = fileNodeMap.get(filePath);
-            return {
-                filePath,
-                matchScore: Math.min(100, Math.round(data.matchScore)),
-                matchReasons: data.matchReasons,
-                functions: [...data.functions],
-                isEntryPoint: node?.isEntryPoint ?? false,
-                isDeadCode: node?.isDeadCode ?? false,
-            };
-        })
-        .sort((a, b) => b.matchScore - a.matchScore)
+    const topFiles: CandidateFile[] = [...candidateFileMap.entries()]
+        .map(([filePath, data]) => ({
+            filePath,
+            score: Math.min(100, Math.round(data.score)),
+            matchedReasons: data.reasons,
+        }))
+        .sort((a, b) => b.score - a.score)
         .slice(0, maxResults);
 
-    // ── Hotspots: top 5 by architectural importance among matches ──────────────
-    const hotspots = candidates
-        .filter(c => !c.isDeadCode)
-        .sort((a, b) => {
-            const aArch = fileNodeMap.get(a.filePath)?.architecturalImportance ?? 0;
-            const bArch = fileNodeMap.get(b.filePath)?.architecturalImportance ?? 0;
-            return bArch - aArch;
-        })
-        .slice(0, 5)
-        .map(c => c.filePath);
+    const topFunctions: CandidateFunction[] = [...candidateFunctionMap.entries()]
+        .map(([functionId, data]) => ({
+            functionId,
+            filePath: data.filePath,
+            score: Math.min(100, Math.round(data.score)),
+            matchedReasons: data.reasons,
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxResults);
 
-    // ── Relevant symbols: all matched function names ──────────────────────────
-    const relevantSymbols = [...new Set(
-        exportResults.map(r => r.entry.name)
-    )].slice(0, 20);
+    // Calculate an overall confidence based on the top scores
+    let confidenceScore = 0;
+    if (topFiles.length > 0) confidenceScore = topFiles[0].score;
+    if (topFunctions.length > 0 && topFunctions[0].score > confidenceScore) {
+        confidenceScore = topFunctions[0].score;
+    }
 
     return {
-        query,
-        candidates,
-        hotspots,
-        relevantSymbols,
-        totalMatches: candidates.length,
+        issueText: query,
+        matchedKeywords: tokens,
+        topFiles,
+        topFunctions,
+        confidenceScore,
     };
 }

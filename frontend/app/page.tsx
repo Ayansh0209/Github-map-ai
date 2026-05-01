@@ -9,6 +9,7 @@ import DetailsPanel from "./components/DetailsPanel";
 import StatsBar from "./components/StatsBar";
 import GraphControls from "./components/GraphControls";
 import SearchPanel from "./components/SearchPanel";
+import type { IssueFileContext } from "./components/SearchPanel";
 import { useJobPolling } from "./hooks/useJobPolling";
 import { submitAnalysis } from "./lib/client";
 import type {
@@ -16,6 +17,7 @@ import type {
   FunctionNodeDTO,
   FunctionFilePayload,
   ViewMode,
+  IssueContext,
 } from "./lib/types";
 
 export default function Home() {
@@ -37,6 +39,9 @@ export default function Home() {
   const [view, setView] = useState<ViewMode>("file-graph");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchPanelOpen, setSearchPanelOpen] = useState(false);
+  // Diagnose / issue mapping state
+  const [highlightedFiles, setHighlightedFiles] = useState<string[]>([]);
+  const [issueContext, setIssueContext] = useState<IssueContext | null>(null);
   const resetZoomRef = useRef<(() => void) | null>(null);
 
   const isLoading =
@@ -63,6 +68,8 @@ export default function Home() {
       setSelectedFunction(null);
       setView("file-graph");
       setSearchQuery("");
+      setHighlightedFiles([]);
+      setIssueContext(null);
 
       try {
         const { jobId } = await submitAnalysis(repoUrl);
@@ -95,6 +102,22 @@ export default function Home() {
       setView("function-graph");
     },
     []
+  );
+
+  // Navigate directly to a function from Diagnose results
+  const handleFunctionNavigateById = useCallback(
+    (functionId: string, filePath: string) => {
+      if (!functionFiles) return;
+      // find the function across all function payloads
+      for (const payload of Object.values(functionFiles)) {
+        const fn = payload.functions.find(f => f.id === functionId || f.filePath === filePath);
+        if (fn) { setSelectedFunction(fn); setView("function-graph"); return; }
+      }
+      // fallback: just navigate to the file
+      const file = fileGraph?.files.find(f => f.id === filePath);
+      if (file) setSelectedFile(file);
+    },
+    [functionFiles, fileGraph]
   );
 
   const handleFunctionNavigate = useCallback(
@@ -164,7 +187,21 @@ export default function Home() {
     setView("file-graph");
     setSearchQuery("");
     setSearchPanelOpen(false);
+    setHighlightedFiles([]);
+    setIssueContext(null);
   }, [reset]);
+
+  // ── Stable SearchPanel callbacks (must NOT be inline arrows to avoid infinite loops) ──
+  const handleSearchPanelClose = useCallback(() => setSearchPanelOpen(false), []);
+  const handleSearchPanelSelectFile = useCallback((filePath: string, ctx?: IssueFileContext) => {
+    const file = fileGraph?.files.find((f) => f.id === filePath) ?? null;
+    if (file) setSelectedFile(file);
+    if (ctx) setIssueContext(ctx);
+  }, [fileGraph]);
+  const handleClearHighlight = useCallback(() => {
+    setHighlightedFiles([]);
+    setIssueContext(null);
+  }, []);
 
   // ── Cmd+K keyboard shortcut for search panel ──────────────────────────────
   useEffect(() => {
@@ -345,6 +382,7 @@ export default function Home() {
                 searchQuery={searchQuery}
                 selectedFileId={selectedFile?.id ?? null}
                 resetZoomRef={resetZoomRef}
+                highlightedFiles={highlightedFiles}
               />
             ) : selectedFunction && functionFiles ? (
               <FunctionGraph
@@ -414,23 +452,21 @@ export default function Home() {
           onClose={() => setSelectedFile(null)}
           onFileNavigate={handleFileNavigate}
           onFunctionClick={handleFunctionClick}
+          issueContext={issueContext}
         />
       )}
 
-      {/* ── Search Panel (sidebar overlay) ──────────────────────────────── */}
+      {/* ── Search Panel (sidebar overlay) ──────────────────────────── */}
       {isDone && fileGraph && (
         <SearchPanel
           isOpen={searchPanelOpen}
-          onClose={() => setSearchPanelOpen(false)}
+          onClose={handleSearchPanelClose}
           owner={owner}
           repo={repo}
-          onSelectFile={(filePath) => {
-            const file = fileGraph.files.find((f) => f.id === filePath);
-            if (file) {
-              setSelectedFile(file);
-              setSearchPanelOpen(false);
-            }
-          }}
+          onSelectFile={handleSearchPanelSelectFile}
+          onSelectFunction={handleFunctionNavigateById}
+          onHighlightFiles={setHighlightedFiles}
+          onClearHighlight={handleClearHighlight}
         />
       )}
 

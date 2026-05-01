@@ -205,12 +205,9 @@ router.get("/issues", async (req: Request, res: Response, next: NextFunction) =>
             });
         }
 
-        const fileNodes = await getFileNodes(params.owner, params.repo);
-
         const result = mapIssueToCode(
             params.q,
             index,
-            fileNodes,
             params.limit,
         );
 

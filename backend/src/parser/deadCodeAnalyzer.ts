@@ -97,6 +97,32 @@ const FRAMEWORK_ROUTE_STEMS = new Set([
 ]);
 
 /**
+ * Path segments that indicate shared/utility/support code.
+ * Exports from these files are typically consumed via CommonJS require()
+ * or indirect patterns that static analysis cannot fully trace.
+ * We suppress unused-export flags for these files to avoid false positives.
+ */
+const UTILITY_SEGMENTS = new Set([
+    "utils", "util", "utility", "utilities",
+    "helpers", "helper",
+    "support",
+    "shared",
+    "common",
+    "lib",
+    "tools",
+]);
+
+/**
+ * Returns true if this file sits in a utility/shared/support directory.
+ * Such files are consumed indirectly (especially in CommonJS repos) and
+ * should not have their exports aggressively flagged as unused.
+ */
+function isInUtilityFolder(filePath: string): boolean {
+    const segments = filePath.split("/");
+    return segments.some(s => UTILITY_SEGMENTS.has(s.toLowerCase()));
+}
+
+/**
  * Returns true if this file is a framework semantic entry:
  *   1. Already scored as an entry point, OR
  *   2. Its filename stem matches a known framework route pattern
@@ -119,7 +145,16 @@ function isFrameworkSemanticFile(file: { id: string; isEntryPoint: boolean }): b
 
 /**
  * Find exported symbols from a file that are never imported by any other file.
- * Uses the import edge symbols array for lookup.
+ *
+ * Handles both ESM and CommonJS patterns:
+ *   - ESM:     import { foo } from './bar'   → symbols = ['foo']
+ *   - CJS:     const bar = require('./bar')  → symbols = [] or ['*']
+ *   - Mixed:   const { foo } = require('./bar') → symbols = ['foo'] (if parser captured)
+ *
+ * When ANY import edge targeting this file has an empty or wildcard symbols
+ * array, we treat it as a whole-module import (CommonJS require or
+ * `import * as`). In that case, the consumer may access ANY export at
+ * runtime, so we conservatively report NO unused exports.
  */
 function findUnusedExports(
     fileId: string,
@@ -133,22 +168,42 @@ function findUnusedExports(
 
     if (exportedNames.length === 0) return [];
 
-    // Collect all symbols imported FROM this file by any other file
-    const importedSymbols = new Set<string>();
-    for (const edge of allImportEdges) {
-        if (edge.target === fileId) {
-            for (const sym of edge.symbols) {
-                importedSymbols.add(sym);
-            }
+    // Collect all import edges targeting this file
+    const incomingEdges = allImportEdges.filter(e => e.target === fileId);
+
+    // If nobody imports this file at all, all exports are unused
+    if (incomingEdges.length === 0) return exportedNames;
+
+    // Check for whole-module / CommonJS imports:
+    //   - Empty symbols array → require('./x') with no destructuring
+    //   - Contains '*' or 'default' → import * as x / import x from
+    // In these cases we CANNOT determine which exports are accessed at
+    // runtime, so we conservatively assume ALL exports are used.
+    for (const edge of incomingEdges) {
+        if (
+            edge.symbols.length === 0 ||
+            edge.symbols.includes("*") ||
+            edge.symbols.includes("default")
+        ) {
+            return []; // whole-module import — all exports considered used
         }
     }
 
-    // Symbols exported but never imported
+    // Build the set of explicitly imported symbol names
+    const importedSymbols = new Set<string>();
+    for (const edge of incomingEdges) {
+        for (const sym of edge.symbols) {
+            importedSymbols.add(sym);
+        }
+    }
+
+    // Symbols exported but never explicitly imported
     return exportedNames.filter(name => !importedSymbols.has(name));
 }
 
 /**
  * Find internal (non-exported) functions that are never called by anything.
+ * Respects CommonJS callback/utility patterns and framework hooks.
  */
 function findOrphanSymbols(
     fileId: string,
@@ -160,7 +215,9 @@ function findOrphanSymbols(
             !fn.isExported &&
             fn.calledBy.length === 0 &&
             fn.kind !== "test" &&
-            fn.kind !== "constructor"
+            fn.kind !== "constructor" &&
+            fn.kind !== "middleware" &&
+            fn.kind !== "route-handler"
         )
         .map(fn => fn.name);
 }
@@ -206,8 +263,14 @@ export function analyzeDeadCode(
         // false positives on framework-router-consumed exports (page.jsx default,
         // layout.jsx default, route.ts handlers, etc.)
         const isFramework = isFrameworkSemanticFile(file);
-        const unusedExports = isFramework ? [] : findUnusedExports(file.id, allFunctions, importEdges);
-        const orphanSymbols = isFramework ? [] : findOrphanSymbols(file.id, allFunctions);
+        const isUtility = isInUtilityFolder(file.id);
+
+        // Skip symbol-level analysis for files where unused-export detection
+        // cannot be reliable: framework semantic files and shared utility modules
+        // (especially CommonJS repos where require() doesn't carry symbol info)
+        const skipSymbolAnalysis = isFramework || isUtility;
+        const unusedExports = skipSymbolAnalysis ? [] : findUnusedExports(file.id, allFunctions, importEdges);
+        const orphanSymbols = skipSymbolAnalysis ? [] : findOrphanSymbols(file.id, allFunctions);
 
         file.unusedExports = unusedExports;
         file.orphanSymbols = orphanSymbols;
@@ -237,10 +300,15 @@ export function analyzeDeadCode(
         // Cap at 100
         score = Math.min(100, score);
 
-        // Framework semantic files, entry points, tests, and configs are NEVER
-        // dead — force score to 0. isFramework already covers isEntryPoint but
-        // we keep the explicit check here for clarity and safety.
-        if (isFramework || file.kind === "test" || file.kind === "config" || file.kind === "declaration") {
+        // Framework semantic files, entry points, tests, configs, and utility/
+        // shared modules are NEVER dead — force score to 0.
+        if (
+            isFramework ||
+            isUtility ||
+            file.kind === "test" ||
+            file.kind === "config" ||
+            file.kind === "declaration"
+        ) {
             score = 0;
         }
 

@@ -15,6 +15,7 @@ interface FileGraphProps {
   searchQuery: string;
   selectedFileId: string | null;
   resetZoomRef?: React.MutableRefObject<(() => void) | null>;
+  highlightedFiles?: string[]; // issue-mapped file paths — shown with amber ring
 }
 
 interface SimNode extends d3.SimulationNodeDatum {
@@ -54,7 +55,7 @@ function trunc(s: string, max: number) {
 }
 
 export default function FileGraph({
-  files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef,
+  files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef, highlightedFiles = [],
 }: FileGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<d3.Selection<SVGSVGElement, unknown, null, undefined> | null>(null);
@@ -71,10 +72,39 @@ export default function FileGraph({
   useEffect(() => { onFileClickRef.current = onFileClick; }, [onFileClick]);
   useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
 
+  // ── Issue-highlight ring — driven by Diagnose results (DEBUG: bright red) ────
+  useEffect(() => {
+    if (!nodeGRef.current) return;
+    const highlightSet = new Set(highlightedFiles);
+
+    // DEBUG: log what we're trying to match
+    if (highlightSet.size > 0) {
+      const allNodeIds: string[] = [];
+      nodeGRef.current.each((d: SimNode) => allNodeIds.push(d.id));
+      console.log("[FileGraph] highlightedFiles:", [...highlightSet]);
+      console.log("[FileGraph] sample node IDs:", allNodeIds.slice(0, 5));
+      const matched = allNodeIds.filter(id => highlightSet.has(id));
+      console.log("[FileGraph] matched nodes:", matched.length, matched);
+    }
+
+    // selectAll clears rings on EVERY node group, not just the first
+    nodeGRef.current.selectAll<SVGCircleElement, SimNode>(".issue-ring")
+      .attr("r", 0).attr("stroke-opacity", 0).attr("fill-opacity", 0);
+    if (highlightSet.size > 0) {
+      nodeGRef.current
+        .filter((d: SimNode) => highlightSet.has(d.id))
+        .select<SVGCircleElement>(".issue-ring")
+        .attr("r", (d: SimNode) => getRadius(d) + 12)
+        .attr("stroke-opacity", 1)
+        .attr("fill-opacity", 0.2);
+    }
+  }, [highlightedFiles]);
+
   // ── Selection ring — runs when selectedFileId changes, NO camera move ────────
   useEffect(() => {
     if (!nodeGRef.current) return;
-    nodeGRef.current.select<SVGCircleElement>(".sel-ring")
+    // Must use selectAll to clear ALL sel-rings, not just the first
+    nodeGRef.current.selectAll<SVGCircleElement, SimNode>(".sel-ring")
       .attr("r", 0).attr("stroke-opacity", 0);
     if (selectedFileId) {
       nodeGRef.current
@@ -83,7 +113,7 @@ export default function FileGraph({
         .attr("r", (d: SimNode) => getRadius(d) + 7)
         .attr("stroke-opacity", 1);
     }
-    nodeGRef.current.select<SVGTextElement>("text").attr("opacity", (d: SimNode) =>
+    nodeGRef.current.selectAll<SVGTextElement, SimNode>("text").attr("opacity", (d: SimNode) =>
       d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileId ? 1 : 0
     );
   }, [selectedFileId]);
@@ -211,9 +241,13 @@ export default function FileGraph({
           .on("end", (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
       nodeGRef.current = nodeG;
 
-      nodeG.each(function(d) {
+      nodeG.each(function (d) {
         const g2 = d3.select(this);
         const r = getRadius(d);
+        // Issue highlight ring (amber — driven by Diagnose results)
+        g2.append("circle").attr("class", "issue-ring").attr("r", 0)
+          .attr("fill", "none").attr("stroke", "#f0ad00").attr("stroke-width", 2)
+          .attr("stroke-opacity", 0).attr("stroke-dasharray", "4,3").attr("pointer-events", "none");
         // Selection ring (orange, hidden by default)
         g2.append("circle").attr("class", "sel-ring").attr("r", 0)
           .attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 2.5)
@@ -262,7 +296,7 @@ export default function FileGraph({
 
       // 7. Interactions
       nodeG
-        .on("mouseover", function(ev, d) {
+        .on("mouseover", function (ev, d) {
           d3.select(this).select(".hover-ring").attr("r", getRadius(d) + 4).attr("stroke-opacity", 0.8);
           d3.select(this).select("text").attr("opacity", 1);
           const conn = new Set([d.id]);
@@ -275,7 +309,7 @@ export default function FileGraph({
             .html(`<strong>${d.data.label}</strong><br/><span style="color:#8b949e">${d.data.path}</span><br/>${d.data.language} · ${d.data.lineCount} lines${d.data.isEntryPoint ? ' · <span style="color:#22c55e">entry</span>' : ""}`)
             .style("left", (ev.offsetX + 16) + "px").style("top", (ev.offsetY - 10) + "px");
         })
-        .on("mouseout", function(_ev, d) {
+        .on("mouseout", function (_ev, d) {
           d3.select(this).select(".hover-ring").attr("r", 0).attr("stroke-opacity", 0);
           const always = d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileIdRef.current;
           d3.select(this).select("text").attr("opacity", always ? 1 : 0);
@@ -284,7 +318,7 @@ export default function FileGraph({
           tooltip.style("opacity", "0");
         })
         .on("click", (_ev, d) => { onFileClickRef.current(d.data); })
-        .on("dblclick", function(ev, d) {
+        .on("dblclick", function (ev, d) {
           ev.stopPropagation();
           if (!svgRef.current || !zoomRef.current || d.x == null || d.y == null) return;
           const scale = 2.5;
@@ -295,30 +329,30 @@ export default function FileGraph({
       // 8. Simulation
       const sim = d3.forceSimulation<SimNode>(nodes)
         .force("link", d3.forceLink<SimNode, SimLink>(links).id(d => d.id)
-            .distance(d => {
-                const s = d.source as SimNode;
-                const t = d.target as SimNode;
-                if (s.data.isEntryPoint || t.data.isEntryPoint) return 180;
-                if (s.isHub || t.isHub) return 120;
-                return 70;
-            })
-            .strength(0.5)
+          .distance(d => {
+            const s = d.source as SimNode;
+            const t = d.target as SimNode;
+            if (s.data.isEntryPoint || t.data.isEntryPoint) return 180;
+            if (s.isHub || t.isHub) return 120;
+            return 70;
+          })
+          .strength(0.5)
         )
         .force("charge", d3.forceManyBody<SimNode>().strength(d => {
-            if (d.data.isEntryPoint) return -800;
-            if (d.isHub) return -500;
-            if (d.data.kind === "test") return -300;
-            return -200;
+          if (d.data.isEntryPoint) return -800;
+          if (d.isHub) return -500;
+          if (d.data.kind === "test") return -300;
+          return -200;
         }))
         .force("collision", d3.forceCollide<SimNode>().radius(d => {
-            let r = getRadius(d) + 12;
-            if (d.data.isEntryPoint) r += 40;
-            else if (d.isHub) r += 20;
-            return r;
+          let r = getRadius(d) + 12;
+          if (d.data.isEntryPoint) r += 40;
+          else if (d.isHub) r += 20;
+          return r;
         }).iterations(3))
-        .force("x", d3.forceX<SimNode>(d => d.x ?? 0).strength(d => d.data.kind === "test" ? 0.02 : 0.08))
-        .force("y", d3.forceY<SimNode>(d => d.y ?? 0).strength(d => d.data.kind === "test" ? 0.02 : 0.08))
-        .force("center", d3.forceCenter(width / 2, height / 2).strength(0.02));
+        .force("x", d3.forceX<SimNode>(width / 2).strength(0.03))
+        .force("y", d3.forceY<SimNode>(height / 2).strength(0.03))
+        .force("center", d3.forceCenter(width / 2, height / 2).strength(0.05));
       simulationRef.current = sim;
 
       sim.on("tick", () => {
@@ -395,7 +429,7 @@ export default function FileGraph({
         style={{ background: "rgba(13,17,23,0.92)", borderColor: "#30363d", pointerEvents: "none" }}>
         <div className="font-semibold mb-2" style={{ color: "#8b949e" }}>Legend</div>
         {[{ color: "#3178c6", label: "TypeScript" }, { color: "#e8a400", label: "JavaScript" },
-          { color: "#7c3aed", label: "TSX" }, { color: "#ea580c", label: "JSX" }].map(({ color, label }) => (
+        { color: "#7c3aed", label: "TSX" }, { color: "#ea580c", label: "JSX" }].map(({ color, label }) => (
           <div key={label} className="flex items-center gap-2">
             <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color }} />
             <span style={{ color: "#e6edf3" }}>{label}</span>

@@ -210,6 +210,8 @@ export interface SearchIndexEntry {
     isDeadCode?: boolean;
     packageName?: string;      // workspace package
     tokens: string[];          // pre-tokenized search terms
+    usageCount?: number;       // number of incoming imports or function calls
+    hubScore?: number;         // architectural connectivity score (0-100)
 }
 
 export interface SearchIndex {
@@ -219,21 +221,25 @@ export interface SearchIndex {
 
 // ── Phase 3: Issue mapping result types ───────────────────────────────────────
 
-export interface IssueMappingCandidate {
+export interface CandidateFile {
     filePath: string;
-    matchScore: number;        // 0–100 deterministic confidence
-    matchReasons: string[];    // why this file was matched
-    functions: string[];       // relevant function names within the file
-    isEntryPoint: boolean;
-    isDeadCode: boolean;
+    score: number;
+    matchedReasons: string[];
+}
+
+export interface CandidateFunction {
+    functionId: string;
+    filePath: string;
+    score: number;
+    matchedReasons: string[];
 }
 
 export interface IssueMappingResult {
-    query: string;
-    candidates: IssueMappingCandidate[];
-    hotspots: string[];        // top-5 most architecturally relevant files
-    relevantSymbols: string[]; // matched exported symbols
-    totalMatches: number;
+    issueText: string;
+    matchedKeywords: string[];
+    topFiles: CandidateFile[];
+    topFunctions: CandidateFunction[];
+    confidenceScore: number;
 }
 
 // ── Phase 3: Repo metadata types ──────────────────────────────────────────────

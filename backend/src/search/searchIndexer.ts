@@ -20,6 +20,7 @@ import type {
     FunctionNode,
     SearchIndex,
     SearchIndexEntry,
+    ImportEdge,
 } from "../models/schema";
 
 // ── Tokenizer ─────────────────────────────────────────────────────────────────
@@ -60,8 +61,15 @@ function tokenize(input: string): string[] {
 export function buildSearchIndex(
     fileNodes: FileNode[],
     allFunctions: FunctionNode[],
+    importEdges: ImportEdge[],
 ): SearchIndex {
     const entries: SearchIndexEntry[] = [];
+
+    // Pre-calculate file in-degree for usageCount
+    const inDegree = new Map<string, number>();
+    for (const edge of importEdges) {
+        inDegree.set(edge.target, (inDegree.get(edge.target) ?? 0) + 1);
+    }
 
     // ── Index all files ───────────────────────────────────────────────────────
     for (const file of fileNodes) {
@@ -77,6 +85,16 @@ export function buildSearchIndex(
         if (file.workspacePackage) {
             tokens.push(...tokenize(file.workspacePackage));
         }
+        
+        // Framework hints based on path
+        const lowerId = file.id.toLowerCase();
+        if (lowerId.includes("route")) tokens.push("route");
+        if (lowerId.includes("middleware")) tokens.push("middleware");
+        if (lowerId.includes("service")) tokens.push("service");
+        if (lowerId.includes("controller")) tokens.push("controller");
+        if (lowerId.includes("auth")) tokens.push("auth");
+        if (lowerId.includes("hook") || lowerId.includes("use")) tokens.push("hook");
+        if (lowerId.includes("store") || lowerId.includes("slice") || lowerId.includes("reducer")) tokens.push("state", "reducer", "store");
 
         entries.push({
             id: file.id,
@@ -89,6 +107,8 @@ export function buildSearchIndex(
             isDeadCode: file.isDeadCode ?? false,
             packageName: file.workspacePackage,
             tokens: [...new Set(tokens)],
+            usageCount: inDegree.get(file.id) ?? 0,
+            hubScore: file.hubScore ?? 0,
         });
     }
 
@@ -111,6 +131,7 @@ export function buildSearchIndex(
             filePath: fn.filePath,
             kind: fn.kind,
             tokens: [...new Set(tokens)],
+            usageCount: fn.calledBy.length,
         });
     }
 
