@@ -31,6 +31,8 @@ export interface FileNodeDTO {
   isEntryPoint: boolean;
   externalImports: string[];
   unresolvedImports: string[];
+  entryScore?: number;
+  entryReasons?: string[];
 }
 
 export interface ImportEdgeDTO {

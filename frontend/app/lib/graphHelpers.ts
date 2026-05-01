@@ -33,7 +33,8 @@ export function makeGitHubFileLink(
   commitSha: string,
   filePath: string
 ): string {
-  return `https://github.com/${owner}/${repo}/blob/${commitSha}/${filePath}`;
+  const safePath = filePath.split("/").map(encodeURIComponent).join("/");
+  return `https://github.com/${owner}/${repo}/blob/${commitSha}/${safePath}`;
 }
 
 export function makeGitHubLineLink(
@@ -44,7 +45,8 @@ export function makeGitHubLineLink(
   startLine: number,
   endLine: number
 ): string {
-  return `https://github.com/${owner}/${repo}/blob/${commitSha}/${filePath}#L${startLine}-L${endLine}`;
+  const safePath = filePath.split("/").map(encodeURIComponent).join("/");
+  return `https://github.com/${owner}/${repo}/blob/${commitSha}/${safePath}#L${startLine}-L${endLine}`;
 }
 
 // ── Sanitize file ID ──────────────────────────────────────────────────────────

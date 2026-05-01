@@ -23,6 +23,7 @@ interface AliasEntry {
     prefix:    string;   // e.g. "@/" or "#utils/"
     targets:   string[]; // absolute base paths to try
     isWildcard: boolean; // true when alias ends in /* or /* removed suffix
+    isExplicit: boolean; // true if from config (tsconfig/package.json). False for safety fallbacks.
 }
 
 /** A resolved import: either an internal file path or an external package */
@@ -178,8 +179,13 @@ export class AliasResolver {
                 if (resolved) return this.makeInternal(resolved);
             }
 
-            // Alias matched but no file found on disk
-            return { kind: "unresolved" };
+            // If it was explicitly configured by the user, and it didn't exist on disk,
+            // it's truly an unresolved alias.
+            // If it's a safety fallback (e.g. we guessed 'redux/' might be 'src/redux/'),
+            // we should just continue and eventually fall back to 'external'.
+            if (entry.isExplicit) {
+                return { kind: "unresolved" };
+            }
         }
 
         return { kind: "external", packageName: pkgName };
@@ -196,33 +202,41 @@ export class AliasResolver {
         const entries: AliasEntry[] = [];
         let hasConfig = false;
 
-        // ── 1. tsconfig.json (highest priority) ──────────────────────────────
-        const tsConfigResult = this.loadTsOrJsConfig("tsconfig.json");
+        // ── 1. Root tsconfig.json (highest priority) ─────────────────────────
+        const tsConfigResult = this.loadTsOrJsConfigAt(path.join(this.repoRoot, "tsconfig.json"));
         if (tsConfigResult.length > 0) {
             entries.push(...tsConfigResult);
             hasConfig = true;
         }
 
-        // ── 2. jsconfig.json ─────────────────────────────────────────────────
-        const jsConfigResult = this.loadTsOrJsConfig("jsconfig.json");
+        // ── 2. Root jsconfig.json ────────────────────────────────────────────
+        const jsConfigResult = this.loadTsOrJsConfigAt(path.join(this.repoRoot, "jsconfig.json"));
         if (jsConfigResult.length > 0) {
             entries.push(...jsConfigResult);
             hasConfig = true;
         }
 
-        // ── 3. package.json "imports" (Node.js subpath imports #foo) ─────────
+        // ── 3. Subdirectory configs (1 level deep) ───────────────────────────
+        // Many repos have structure like frontend/, backend/, client/, server/
+        // Each may have its own tsconfig/jsconfig with path aliases.
+        const subConfigResults = this.loadSubdirectoryConfigs();
+        if (subConfigResults.length > 0) {
+            entries.push(...subConfigResults);
+            hasConfig = true;
+        }
+
+        // ── 4. package.json "imports" (Node.js subpath imports #foo) ─────────
         const importEntries = this.loadPackageImports();
         if (importEntries.length > 0) {
             entries.push(...importEntries);
             hasConfig = true;
         }
 
-        // ── 4. Framework fallbacks — only when NO config alias was found ──────
+        // ── 5. Safety fallbacks — ALWAYS ADDED at the lowest priority ────────
         // These cover common setups like CRA, Next.js without tsconfig paths,
-        // or Vite projects that forgot to add resolve.alias to tsconfig.
-        if (!hasConfig) {
-            entries.push(...this.frameworkFallbacks());
-        }
+        // Vite projects, or missing baseUrl. They are marked isExplicit=false
+        // so if they don't resolve on disk, they fall through to external.
+        entries.push(...this.safetyFallbacks());
 
         // Sort longest prefix first so more specific aliases win
         entries.sort((a, b) => b.prefix.length - a.prefix.length);
@@ -230,42 +244,79 @@ export class AliasResolver {
         return { entries, hasConfig };
     }
 
-    private loadTsOrJsConfig(filename: string): AliasEntry[] {
-        const configPath = path.join(this.repoRoot, filename);
-        const parsed     = safeReadJson(configPath);
+    /**
+     * Load a single tsconfig.json or jsconfig.json from a specific absolute path.
+     * Resolves baseUrl and paths relative to the config file's directory.
+     */
+    private loadTsOrJsConfigAt(configPath: string): AliasEntry[] {
+        const parsed = safeReadJson(configPath);
         if (!parsed) return [];
 
         const opts     = (parsed.compilerOptions ?? {}) as Record<string, unknown>;
+        const configDir = path.dirname(configPath);
         const entries: AliasEntry[] = [];
 
         // baseUrl: resolve bare non-relative imports relative to this directory
-        // e.g., "utils/parser" → "<baseUrl>/utils/parser.ts"
         const rawBaseUrl = opts.baseUrl as string | undefined;
         if (rawBaseUrl) {
-            const baseUrlAbs = path.resolve(this.repoRoot, rawBaseUrl);
-            // A baseUrl alias with an empty prefix catches everything — add at end
+            const baseUrlAbs = path.resolve(configDir, rawBaseUrl);
             entries.push({
                 prefix:    "",
                 targets:   [baseUrlAbs],
                 isWildcard: true,
+                isExplicit: true,
             });
         }
 
         // paths: explicit alias mappings
         const paths = (opts.paths ?? {}) as Record<string, string[]>;
         for (const [alias, rawTargets] of Object.entries(paths)) {
-            // Determine prefix and whether wildcard
             const isWildcard = alias.endsWith("/*");
             const prefix     = isWildcard ? alias.slice(0, -2) : alias;
 
-            // Resolve target paths relative to the directory containing tsconfig
-            const configDir = path.dirname(configPath);
-            const targets   = rawTargets.map((t) => {
-                const bare    = t.endsWith("/*") ? t.slice(0, -2) : t;
+            // Resolve target paths relative to the config file's directory
+            const targets = rawTargets.map((t) => {
+                const bare = t.endsWith("/*") ? t.slice(0, -2) : t;
                 return path.resolve(configDir, bare);
             });
 
-            entries.push({ prefix, targets, isWildcard });
+            entries.push({ prefix, targets, isWildcard, isExplicit: true });
+        }
+
+        if (entries.length > 0) {
+            console.log(`[aliasResolver] loaded ${entries.length} alias entries from ${configPath}`);
+        }
+
+        return entries;
+    }
+
+    /**
+     * Scan immediate subdirectories for tsconfig.json / jsconfig.json.
+     * This handles repos like E-commerce-website where the config lives
+     * at frontend/jsconfig.json or client/tsconfig.json, not at the root.
+     * Only scans 1 level deep to avoid performance issues.
+     */
+    private loadSubdirectoryConfigs(): AliasEntry[] {
+        const entries: AliasEntry[] = [];
+        let dirEntries: string[];
+        try { dirEntries = fs.readdirSync(this.repoRoot); } catch { return []; }
+
+        for (const entry of dirEntries) {
+            const subDir = path.join(this.repoRoot, entry);
+            try {
+                if (!fs.statSync(subDir).isDirectory()) continue;
+            } catch { continue; }
+
+            // Skip node_modules, hidden dirs, and common non-source dirs
+            if (entry.startsWith(".") || entry === "node_modules" || entry === "dist" || entry === "build") continue;
+
+            for (const configName of ["tsconfig.json", "jsconfig.json"]) {
+                const configPath = path.join(subDir, configName);
+                const result = this.loadTsOrJsConfigAt(configPath);
+                if (result.length > 0) {
+                    entries.push(...result);
+                }
+            }
         }
 
         return entries;
@@ -299,26 +350,74 @@ export class AliasResolver {
                 rawTarget.endsWith("/*") ? rawTarget.slice(0, -2) : rawTarget
             );
 
-            entries.push({ prefix, targets: [targetAbs], isWildcard });
+            entries.push({ prefix, targets: [targetAbs], isWildcard, isExplicit: true });
         }
 
         return entries;
     }
 
-    /** Framework-specific fallback aliases used when no config defines paths */
-    private frameworkFallbacks(): AliasEntry[] {
-        const src     = path.join(this.repoRoot, "src");
-        const hasSrc  = fs.existsSync(src);
-        const srcOrRoot = hasSrc ? src : this.repoRoot;
+    /** Safety fallbacks for common directory structures. Lowest priority. */
+    private safetyFallbacks(): AliasEntry[] {
+        const root = this.repoRoot;
+        const src  = path.join(root, "src");
+        const hasSrc = fs.existsSync(src);
+        const srcOrRoot = hasSrc ? src : root;
 
-        return [
-            // Next.js / CRA / Vite convention: @/ → src/ (or root)
-            { prefix: "@/",  targets: [srcOrRoot], isWildcard: true },
-            // Webpack / tilde convention: ~/ → src/
-            { prefix: "~/",  targets: [srcOrRoot], isWildcard: true },
-            // Bare @ alias: @components → src/components
-            { prefix: "@",   targets: [srcOrRoot], isWildcard: true },
+        // Discover all possible source directories for alias targets.
+        // For monorepo-style projects (e.g., E-commerce-website/frontend/src/),
+        // we also check immediate subdirectory /src/ paths.
+        const srcCandidates: string[] = [srcOrRoot];
+
+        try {
+            const rootEntries = fs.readdirSync(root);
+            for (const entry of rootEntries) {
+                if (entry.startsWith(".") || entry === "node_modules" || entry === "dist" || entry === "build") continue;
+                const subDir = path.join(root, entry);
+                try { if (!fs.statSync(subDir).isDirectory()) continue; } catch { continue; }
+
+                // If subDir/src exists, add it as a candidate
+                const subSrc = path.join(subDir, "src");
+                if (fs.existsSync(subSrc)) srcCandidates.push(subSrc);
+                // Also add subDir itself (e.g., frontend/ could be the root of source)
+                srcCandidates.push(subDir);
+            }
+        } catch { /* ignore */ }
+
+        const fallbacks: AliasEntry[] = [
+            // Next.js / CRA / Vite convention: @/ → src/ (try all candidates)
+            { prefix: "@/",  targets: srcCandidates, isWildcard: true, isExplicit: false },
+            { prefix: "~/",  targets: srcCandidates, isWildcard: true, isExplicit: false },
+            { prefix: "#/",  targets: srcCandidates, isWildcard: true, isExplicit: false },
+            // Bare @ alias: @components → src/components (try all candidates)
+            { prefix: "@",   targets: srcCandidates, isWildcard: true, isExplicit: false },
         ];
+
+        // Bare folder fallbacks (e.g., "redux/product/productSlice")
+        const commonDirs = [
+            "components", "lib", "utils", "redux", "store",
+            "services", "models", "context", "hooks", "config",
+            "features", "pages", "layouts", "middleware",
+            "helpers", "api", "actions", "reducers", "slices",
+        ];
+
+        for (const dir of commonDirs) {
+            // Build targets: try each srcCandidate/<dir> path
+            const targets: string[] = [];
+            for (const base of srcCandidates) {
+                targets.push(path.join(base, dir));
+            }
+            // Also try root/<dir> directly
+            targets.push(path.join(root, dir));
+
+            fallbacks.push({
+                prefix: `${dir}/`,
+                targets,
+                isWildcard: true,
+                isExplicit: false,
+            });
+        }
+
+        return fallbacks;
     }
 
     // ── Workspace / monorepo detection ───────────────────────────────────────

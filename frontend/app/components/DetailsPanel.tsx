@@ -120,8 +120,27 @@ export default function DetailsPanel({
               label="Entry Point"
               value={file.isEntryPoint ? "Yes" : "No"}
             />
+            {file.entryScore !== undefined && (
+              <InfoRow label="Entry Score" value={file.entryScore.toString()} />
+            )}
           </div>
         </section>
+
+        {/* ── ENTRY REASONS ───────────────────────────────────────────────── */}
+        {file.entryReasons && file.entryReasons.length > 0 && (
+          <section>
+            <SectionHeader>Entry Scoring Reasons</SectionHeader>
+            <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#0d1117", border: "1px solid #30363d" }}>
+              <ul className="list-disc list-inside space-y-1">
+                {file.entryReasons.map((reason, i) => (
+                  <li key={i} style={{ color: reason.includes("-") ? "#f85149" : "#3fb950" }}>
+                    <span style={{ color: "#c9d1d9" }}>{reason}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </section>
+        )}
 
         {/* ── FUNCTIONS ───────────────────────────────────────────────────── */}
         <section>
