@@ -308,9 +308,9 @@ export default function FileGraph({
           .style("opacity", 1)
           .html(
             `<strong>${d.data.path}</strong><br/>` +
-              `${d.data.language} · ${d.data.lineCount} lines · ${(d.data.sizeBytes / 1024).toFixed(1)}KB<br/>` +
-              `${d.data.kind}${d.data.isEntryPoint ? " · entry point" : ""}` +
-              `<br/><span style="color:#71717a;font-size:10px">Click to see details & functions</span>`
+            `${d.data.language} · ${d.data.lineCount} lines · ${(d.data.sizeBytes / 1024).toFixed(1)}KB<br/>` +
+            `${d.data.kind}${d.data.isEntryPoint ? " · entry point" : ""}` +
+            `<br/><span style="color:#71717a;font-size:10px">Click to see details & functions</span>`
           )
           .style("left", event.offsetX + 14 + "px")
           .style("top", event.offsetY - 14 + "px");

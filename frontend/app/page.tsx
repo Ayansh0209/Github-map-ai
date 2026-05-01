@@ -178,13 +178,13 @@ export default function Home() {
         {(status === "processing" ||
           status === "queued" ||
           status === "delayed") && (
-          <ProgressBar
-            progress={progress}
-            step={step}
-            status={status}
-            position={position}
-          />
-        )}
+            <ProgressBar
+              progress={progress}
+              step={step}
+              status={status}
+              position={position}
+            />
+          )}
 
         {/* Completed progress */}
         {status === "done" && (

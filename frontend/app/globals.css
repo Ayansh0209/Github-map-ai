@@ -34,16 +34,12 @@ body {
 /* ── Animated gradient background ──────────────────────────── */
 
 .gradient-bg {
-  background: radial-gradient(
-      ellipse 80% 60% at 50% -20%,
+  background: radial-gradient(ellipse 80% 60% at 50% -20%,
       rgba(99, 102, 241, 0.15),
-      transparent
-    ),
-    radial-gradient(
-      ellipse 60% 40% at 80% 50%,
+      transparent),
+    radial-gradient(ellipse 60% 40% at 80% 50%,
       rgba(167, 139, 250, 0.08),
-      transparent
-    ),
+      transparent),
     var(--background);
 }
 
@@ -66,12 +62,10 @@ body {
 }
 
 .progress-shimmer {
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(255, 255, 255, 0.1),
-    transparent
-  );
+  background: linear-gradient(90deg,
+      transparent,
+      rgba(255, 255, 255, 0.1),
+      transparent);
   animation: shimmer 2s infinite;
 }
 
@@ -79,6 +73,7 @@ body {
   0% {
     transform: translateX(-100%);
   }
+
   100% {
     transform: translateX(100%);
   }
@@ -87,10 +82,12 @@ body {
 /* ── Float animation for hero ──────────────────────────────── */
 
 @keyframes float {
+
   0%,
   100% {
     transform: translateY(0px);
   }
+
   50% {
     transform: translateY(-8px);
   }
@@ -150,13 +147,16 @@ body {
   width: 6px;
   height: 6px;
 }
+
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
 ::-webkit-scrollbar-thumb {
   background: #27272a;
   border-radius: 3px;
 }
+
 ::-webkit-scrollbar-thumb:hover {
   background: #3f3f46;
 }
@@ -176,10 +176,12 @@ body {
 /* ── Pulse dot ─────────────────────────────────────────────── */
 
 @keyframes pulse-dot {
+
   0%,
   100% {
     opacity: 1;
   }
+
   50% {
     opacity: 0.4;
   }
