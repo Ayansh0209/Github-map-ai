@@ -1,210 +1,204 @@
-// src/parser/issueAnalyzer.ts
-// ─────────────────────────────────────────────────────────────────────────────
-// All AI prompt engineering and analysis logic for issue mapping.
-//
-// No HTTP calls. No Redis. Pure input → output functions.
-//
-// Functions:
-//   buildIssueContext()     — builds structured context string for Gemini
-//   callGeminiForMapping()  — calls Gemini 2.0 Flash, returns affected files
-//   callGeminiForFix()      — Phase 2 stub: suggest code fix for a specific file
-// ─────────────────────────────────────────────────────────────────────────────
+// backend/src/parser/issueAnalyzer.ts
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { config } from "../config/config";
-import type { IssueComment } from "../github/issueClient";
-
-// ── Shared types ──────────────────────────────────────────────────────────────
+import type { IssueComment, LinkedPR } from "../github/issueClient";
 
 export interface AffectedFile {
     fileId: string;
-    confidence: number;  // 0-100
-    reason: string;      // one sentence
+    confidence: number;   // 0-100
+    reason: string;
 }
 
 export interface GeminiMappingResult {
     affectedFiles: AffectedFile[];
-    summary: string;
+    summary: string;       // what the issue is about
+    fixApproach: string;   // what kind of change is needed
 }
 
 export interface GeminiFixResult {
     explanation: string;
-    replacementBlocks: Array<{ original: string; replacement: string }>;
+    replacementBlocks: Array<{
+        fileId: string;
+        original: string;
+        replacement: string;
+        lineHint?: number;
+    }>;
 }
 
-// Input shape for buildIssueContext
 export interface IssueContextInput {
     title: string;
     body: string;
     comments: IssueComment[];
+    linkedPRs: LinkedPR[];
 }
 
-// ── Gemini client (lazy singleton) ────────────────────────────────────────────
-
+// Lazy singleton
 let geminiClient: GoogleGenerativeAI | null = null;
-
-function getGeminiClient(): GoogleGenerativeAI | null {
+function getClient(): GoogleGenerativeAI | null {
     if (!config.gemini.apiKey) return null;
     if (!geminiClient) geminiClient = new GoogleGenerativeAI(config.gemini.apiKey);
     return geminiClient;
 }
 
-// ── buildIssueContext ─────────────────────────────────────────────────────────
-
-/**
- * Builds the structured context string to send to Gemini.
- *
- * - issue: the issue title, body, and fetched comments
- * - relevantFiles: top candidates from deterministic matching (max 10)
- * - fileContents: actual source code for top 3 files only
- *     - Truncated: first 100 lines + last 50 lines if file > 200 lines
- *     - Full content if ≤ 200 lines
- *
- * Returns a structured string — never a raw dump.
- */
-export function buildIssueContext(
-    issue: IssueContextInput,
-    relevantFiles: Array<{ fileId: string; confidence: number; reason: string }>,
-    fileContents: Map<string, string>,
+// Build the file list string sent to Gemini
+// Sorted by architectural importance, max 100 entries
+function buildFileListString(
+    files: Array<{ id: string; architecturalImportance?: number }>
 ): string {
-    const parts: string[] = [];
-
-    // Issue body
-    parts.push(`ISSUE: ${issue.title}`);
-    parts.push(`\nDESCRIPTION:\n${issue.body.slice(0, 800)}`);
-
-    // Comments (up to 3, 200 chars each)
-    if (issue.comments.length > 0) {
-        const commentText = issue.comments
-            .slice(0, 3)
-            .map(c => `[${c.author}]: ${c.body.slice(0, 200)}`)
-            .join("\n---\n");
-        parts.push(`\nDISCUSSION (${issue.comments.length} comments):\n${commentText}`);
-    }
-
-    // Deterministic candidates (context only)
-    if (relevantFiles.length > 0) {
-        const candidateLines = relevantFiles
-            .slice(0, 10)
-            .map(f => `  ${f.fileId} (confidence: ${f.confidence}% — ${f.reason})`);
-        parts.push(`\nDETERMINISTIC CANDIDATES:\n${candidateLines.join("\n")}`);
-    }
-
-    // Relevant source code (top 3 files only)
-    const topFiles = relevantFiles.slice(0, 3);
-    const codeSnippets: string[] = [];
-
-    for (const file of topFiles) {
-        const content = fileContents.get(file.fileId);
-        if (!content) continue;
-
-        const lines = content.split("\n");
-        let snippet: string;
-
-        if (lines.length <= 200) {
-            snippet = content;
-        } else {
-            const head = lines.slice(0, 100).join("\n");
-            const tail = lines.slice(-50).join("\n");
-            snippet = `${head}\n... [${lines.length - 150} lines omitted] ...\n${tail}`;
-        }
-
-        codeSnippets.push(`--- ${file.fileId} ---\n${snippet}`);
-    }
-
-    if (codeSnippets.length > 0) {
-        parts.push(`\nRELEVANT SOURCE CODE:\n${codeSnippets.join("\n\n")}`);
-    }
-
-    return parts.join("\n");
+    return [...files]
+        .sort((a, b) => (b.architecturalImportance ?? 0) - (a.architecturalImportance ?? 0))
+        .slice(0, 100)
+        .map((f) => f.id)
+        .join("\n");
 }
 
-// ── callGeminiForMapping ──────────────────────────────────────────────────────
+// Smart truncation for large files
+export function smartTruncate(content: string, issueTerms: string[], maxLines = 300): string {
+    const lines = content.split("\n");
+    if (lines.length <= maxLines) return content;
 
-/**
- * Calls Gemini 2.0 Flash to map an issue to repository files.
- *
- * - context: structured string from buildIssueContext()
- * - fileList: sorted list of files from the repository (used for validation)
- * - issueNumber / issueTitle: for the prompt
- * - comments: for the prompt discussion section
- *
- * Returns { affectedFiles, summary } or null if Gemini fails.
- * On any failure the caller must fall back to the deterministic result.
- */
+    const relevantLineIndices: number[] = [];
+
+    lines.forEach((line, i) => {
+        if (issueTerms.some((term) => line.toLowerCase().includes(term.toLowerCase()))) {
+            for (let j = Math.max(0, i - 10); j <= Math.min(lines.length - 1, i + 10); j++) {
+                relevantLineIndices.push(j);
+            }
+        }
+    });
+
+    if (relevantLineIndices.length > 0) {
+        const uniqueIndices = [...new Set(relevantLineIndices)].sort((a, b) => a - b);
+        const relevantLines = uniqueIndices.map((i) => `L${i + 1}: ${lines[i]}`);
+        const head = lines.slice(0, 50).join("\n");
+        return `${head}\n\n... [${lines.length} total lines, showing relevant sections] ...\n\n${relevantLines.join("\n")}`;
+    }
+
+    return [
+        ...lines.slice(0, 150),
+        `\n... [${lines.length - 200} lines omitted] ...\n`,
+        ...lines.slice(-50),
+    ].join("\n");
+}
+
+// Extract key technical terms from issue for context
+function extractTechnicalTerms(text: string): string[] {
+    // Match: camelCase, snake_case, function names, config keys, method names
+    const matches = text.match(
+        /\b([a-z][a-zA-Z0-9_]{2,}|[A-Z][a-zA-Z0-9_]{2,})\b/g
+    ) ?? [];
+
+    const SKIP = new Set([
+        "the", "this", "that", "with", "from", "have", "will",
+        "should", "would", "could", "does", "when", "what",
+        "issue", "error", "problem", "user", "value", "option",
+        "param", "query", "request", "response",
+    ]);
+
+    return [...new Set(
+        matches
+            .filter((t) => !SKIP.has(t.toLowerCase()) && t.length > 3)
+            .slice(0, 20)
+    )];
+}
+
+// Main mapping function â€” calls Gemini with full context
 export async function callGeminiForMapping(
-    context: string,
-    fileList: Array<{ id: string; architecturalImportance?: number }>,
-    issueNumber: number,
-    issueTitle: string,
     issue: IssueContextInput,
+    files: Array<{ id: string; architecturalImportance?: number }>,
+    keywordHints: string[], // from deterministic matcher
 ): Promise<GeminiMappingResult | null> {
-    const client = getGeminiClient();
+    const client = getClient();
     if (!client) {
-        console.log("[issueAnalyzer] Gemini key not configured, skipping AI step");
+        console.log("[issueAnalyzer] No Gemini key â€” skipping AI");
         return null;
     }
 
     const model = client.getGenerativeModel({
-        model: "gemini-2.5-flash",
+        model: "gemini-2.0-flash",
         systemInstruction:
-            "You are a senior software engineer analyzing a GitHub issue. " +
-            "You will be given an issue description and a list of files from the repository. " +
-            "Your job is to identify which files need to change to fix this issue. " +
+            "You are a senior software engineer helping contributors " +
+            "navigate a codebase to fix a GitHub issue. " +
+            "You understand code architecture, follow import chains, " +
+            "and identify which files need to change. " +
             "Return ONLY valid JSON. No markdown. No explanation outside JSON.",
         generationConfig: {
             temperature: 0.1,
-            maxOutputTokens: 1000,
+            maxOutputTokens: 1200,
         },
     });
 
-    // Build the sorted file list string (by architectural importance)
-    const fileListStr = [...fileList]
-        .sort((a, b) => (b.architecturalImportance ?? 0) - (a.architecturalImportance ?? 0))
-        .slice(0, 100)
-        .map(f => `${f.id}`)
-        .join("\n");
+    const fileListStr = buildFileListString(files);
+    const technicalTerms = extractTechnicalTerms(issue.title + " " + issue.body);
 
-    // Discussion section
-    const discussionSection = issue.comments.length > 0
-        ? `DISCUSSION (${issue.comments.length} comments):\n${
-            issue.comments.slice(0, 3).map(c => c.body.slice(0, 200)).join("\n---\n")
-          }`
-        : "";
+    // PR section â€” most valuable signal
+    let prSection = "";
+    if (issue.linkedPRs.length > 0) {
+        const prLines = issue.linkedPRs.map((pr) => {
+            const status = pr.merged
+                ? "MERGED"
+                : pr.state === "closed"
+                    ? "CLOSED"
+                    : "OPEN";
+            const files = pr.changedFiles.slice(0, 15).join(", ");
+            return `  PR #${pr.number} [${status}]: ${pr.title}\n  Changed files: ${files}`;
+        });
+        prSection = `\nLINKED PULL REQUESTS (these show which files were changed):\n${prLines.join("\n")}`;
+    }
 
-    const prompt = [
-        `ISSUE #${issueNumber}: ${issueTitle}`,
-        ``,
-        `DESCRIPTION:`,
-        issue.body.slice(0, 800),
-        discussionSection ? `\n${discussionSection}` : "",
-        ``,
-        `REPOSITORY FILES (sorted by architectural importance):`,
-        fileListStr,
-        context.includes("RELEVANT SOURCE CODE") ? `\n${context.split("RELEVANT SOURCE CODE")[1] ? "RELEVANT SOURCE CODE" + context.split("RELEVANT SOURCE CODE")[1] : ""}` : "",
-        ``,
-        `TASK: Which files need to change to fix this issue?`,
-        ``,
-        `Return JSON:`,
-        `{`,
-        `  "affectedFiles": [`,
-        `    {`,
-        `      "fileId": "exact/path/from/file/list/above.js",`,
-        `      "confidence": 87,`,
-        `      "reason": "This file contains the method that needs to change per the issue"`,
-        `    }`,
-        `  ],`,
-        `  "summary": "One paragraph explaining what the issue is about and what changes are needed"`,
-        `}`,
-    ].filter(Boolean).join("\n");
+    // Comments section â€” discussion context
+    let commentSection = "";
+    if (issue.comments.length > 0) {
+        const commentLines = issue.comments
+            .slice(0, 5)
+            .map((c) => `[${c.author}]: ${c.body.slice(0, 300)}`);
+        commentSection = `\nDISCUSSION:\n${commentLines.join("\n---\n")}`;
+    }
 
-    const fileIdSet = new Set(fileList.map(f => f.id));
+    // Keyword hints from deterministic engine
+    let hintsSection = "";
+    if (keywordHints.length > 0) {
+        hintsSection = `\nDETERMINISTIC HINTS (files matching keywords):\n${keywordHints.join("\n")}`;
+    }
+
+    const prompt = `ISSUE #${issue.title}
+
+DESCRIPTION:
+${issue.body.slice(0, 1000)}
+${prSection}
+${commentSection}
+${hintsSection}
+
+TECHNICAL TERMS DETECTED: ${technicalTerms.join(", ")}
+
+REPOSITORY FILES (sorted by architectural importance):
+${fileListStr}
+
+TASK:
+1. Understand what this issue is about technically
+2. Identify which files need to change to fix it
+3. Consider the linked PRs â€” if files were changed in a PR for this issue, they are almost certainly affected
+4. Consider file names, paths, and architectural importance
+
+Return JSON:
+{
+  "affectedFiles": [
+    {
+      "fileId": "exact/file/path.js",
+      "confidence": 90,
+      "reason": "This file contains the X function that handles Y"
+    }
+  ],
+  "summary": "What this issue is about in 2 sentences",
+  "fixApproach": "What kind of code change is needed"
+}`;
+
+    const fileIdSet = new Set(files.map((f) => f.id));
 
     try {
         const result = await model.generateContent(prompt);
         const text = result.response.text();
-
-        // Strip markdown code fences if Gemini wraps the output
         const cleaned = text.replace(/```json\s*|```\s*/g, "").trim();
         const parsed = JSON.parse(cleaned);
 
@@ -216,92 +210,73 @@ export async function callGeminiForMapping(
                 reason: String(f.reason ?? "").slice(0, 300),
             }));
 
-        const summary = String(parsed.summary ?? "").slice(0, 1000);
-
-        return { affectedFiles, summary };
+        return {
+            affectedFiles,
+            summary: String(parsed.summary ?? "").slice(0, 500),
+            fixApproach: String(parsed.fixApproach ?? "").slice(0, 300),
+        };
     } catch (err) {
-        console.error("[issueAnalyzer] Gemini mapping failed, falling back to deterministic:", err);
+        console.error("[issueAnalyzer] Gemini mapping failed:", err);
         return null;
     }
 }
 
-// ── callGeminiForFix ──────────────────────────────────────────────────────────
-
-/**
- * Phase 2 — Suggest the actual code fix for a specific mapped file.
- *
- * Wire the function but don't call it yet from the routes.
- * Called only when user explicitly clicks "Suggest Fix" on a specific file.
- *
- * Context sent to Gemini:
- *   - Issue title + body (800 chars)
- *   - Primary file full content (if ≤ 300 lines, send all)
- *   - Connected files (directly import or imported by primary) — max 3, max 100 lines each
- *
- * Returns { explanation, replacementBlocks[] } | null
- */
+// Phase 2: suggest actual code fix
+// Called only when user explicitly clicks "Suggest Fix"
+// Handles large files by smart truncation
 export async function callGeminiForFix(
     issue: IssueContextInput,
-    fileId: string,
-    fileContent: string,
-    connectedFilesContent: Map<string, string>,
+    primaryFile: { id: string; content: string },
+    connectedFiles: Array<{ id: string; content: string }>,
 ): Promise<GeminiFixResult | null> {
-    const client = getGeminiClient();
-    if (!client) {
-        console.log("[issueAnalyzer] Gemini key not configured, cannot suggest fix");
-        return null;
-    }
+    const client = getClient();
+    if (!client) return null;
 
     const model = client.getGenerativeModel({
-        model: "gemini-2.5-flash",
+        model: "gemini-2.0-flash",
         systemInstruction:
-            "You are a senior software engineer. Given a GitHub issue and a file's source code, " +
-            "identify the minimal change needed to fix the issue. " +
-            "Return ONLY valid JSON. No markdown. No explanation outside JSON.",
+            "You are a senior software engineer. Given a GitHub issue and source code, " +
+            "provide the minimal precise code change to fix the issue. " +
+            "Return ONLY valid JSON. No markdown outside JSON.",
         generationConfig: {
             temperature: 0.1,
             maxOutputTokens: 2000,
         },
     });
 
-    // Primary file — send all if ≤ 300 lines, else truncate
-    const primaryLines = fileContent.split("\n");
-    const primarySnippet = primaryLines.length <= 300
-        ? fileContent
-        : [...primaryLines.slice(0, 200), "... [truncated] ...", ...primaryLines.slice(-100)].join("\n");
 
-    // Connected files — max 3, max 100 lines each
-    const connectedSnippets: string[] = [];
-    let count = 0;
-    for (const [connId, connContent] of connectedFilesContent) {
-        if (count >= 3) break;
-        const connLines = connContent.split("\n").slice(0, 100).join("\n");
-        connectedSnippets.push(`--- ${connId} ---\n${connLines}`);
-        count++;
+
+    const primaryContent = smartTruncate(primaryFile.content, extractTechnicalTerms(issue.title + " " + issue.body), 300);
+
+    const connectedContent = connectedFiles
+        .slice(0, 3)
+        .map((f) => `--- ${f.id} ---\n${smartTruncate(f.content, extractTechnicalTerms(issue.title + " " + issue.body), 100)}`)
+        .join("\n\n");
+
+    const prompt = `ISSUE: ${issue.title}
+${issue.body.slice(0, 600)}
+
+PRIMARY FILE TO FIX: ${primaryFile.id}
+\`\`\`
+${primaryContent}
+\`\`\`
+${connectedContent ? `\nCONNECTED FILES:\n${connectedContent}` : ""}
+
+TASK: Provide the minimal code change to fix this issue.
+Show exact lines to replace.
+
+Return JSON:
+{
+  "explanation": "what needs to change and why",
+  "replacementBlocks": [
+    {
+      "fileId": "${primaryFile.id}",
+      "original": "exact original lines",
+      "replacement": "new lines",
+      "lineHint": 42
     }
-
-    const prompt = [
-        `ISSUE: ${issue.title}`,
-        issue.body.slice(0, 800),
-        ``,
-        `PRIMARY FILE TO FIX: ${fileId}`,
-        primarySnippet,
-        connectedSnippets.length > 0 ? `\nCONNECTED FILES:\n${connectedSnippets.join("\n\n")}` : "",
-        ``,
-        `TASK: What is the minimal change needed to fix this issue?`,
-        `Return a replacement block showing the exact lines to change.`,
-        ``,
-        `Return JSON:`,
-        `{`,
-        `  "explanation": "what needs to change and why",`,
-        `  "replacementBlocks": [`,
-        `    {`,
-        `      "original": "exact lines to replace",`,
-        `      "replacement": "new lines"`,
-        `    }`,
-        `  ]`,
-        `}`,
-    ].filter(Boolean).join("\n");
+  ]
+}`;
 
     try {
         const result = await model.generateContent(prompt);
@@ -311,13 +286,58 @@ export async function callGeminiForFix(
 
         return {
             explanation: String(parsed.explanation ?? "").slice(0, 1000),
-            replacementBlocks: (parsed.replacementBlocks ?? []).map((b: { original: string; replacement: string }) => ({
-                original: String(b.original ?? ""),
-                replacement: String(b.replacement ?? ""),
-            })),
+            replacementBlocks: (parsed.replacementBlocks ?? []).map(
+                (b: { fileId: string; original: string; replacement: string; lineHint?: number }) => ({
+                    fileId: String(b.fileId ?? primaryFile.id),
+                    original: String(b.original ?? ""),
+                    replacement: String(b.replacement ?? ""),
+                    lineHint: typeof b.lineHint === "number" ? b.lineHint : undefined,
+                })
+            ),
         };
     } catch (err) {
-        console.error("[issueAnalyzer] Gemini fix suggestion failed:", err);
+        console.error("[issueAnalyzer] Gemini fix failed:", err);
         return null;
     }
+}
+
+// Phase 2: Chat Stream
+export async function callGeminiForChatStream(
+    systemInstruction: string,
+    messages: Array<{ role: "user" | "model"; content: string }>
+) {
+    const client = getClient();
+    if (!client) throw new Error("Gemini API key not configured");
+
+    const model = client.getGenerativeModel({
+        model: "gemini-2.0-flash",
+        systemInstruction,
+        generationConfig: { temperature: 0.2 },
+    });
+
+    // Truncate messages if > 12
+    let truncatedMessages = messages;
+    if (messages.length > 12) {
+        const first3 = messages.slice(0, 3);
+        const middle = messages.slice(3, -4);
+        const last4 = messages.slice(-4);
+        
+        const summaryContent = middle.map(m => m.content.slice(0, 50)).join(" | ");
+        
+        truncatedMessages = [
+            ...first3,
+            { role: "user", content: `[System] Previous conversation summary: ${summaryContent}...` },
+            ...last4
+        ];
+    }
+
+    const history = truncatedMessages.slice(0, -1).map(m => ({
+        role: m.role,
+        parts: [{ text: m.content }]
+    }));
+    
+    const lastMessage = truncatedMessages[truncatedMessages.length - 1].content;
+    
+    const chat = model.startChat({ history });
+    return chat.sendMessageStream(lastMessage);
 }

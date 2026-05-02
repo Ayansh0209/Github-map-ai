@@ -12,9 +12,9 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { redisConnection } from "../queue/jobQueue";
-import { fetchIssue, fetchOpenIssues, fetchIssueComments } from "../github/issueClient";
+import { fetchIssue, fetchOpenIssues, fetchIssueComments, fetchLinkedPRs, fetchRawFile } from "../github/issueClient";
 import { mapIssueToCode, buildInlineSearchIndex } from "../parser/issueMapper";
-import { buildIssueContext, callGeminiForMapping } from "../parser/issueAnalyzer";
+import { callGeminiForMapping, smartTruncate, callGeminiForChatStream } from "../parser/issueAnalyzer";
 import type { AffectedFile } from "../parser/issueAnalyzer";
 import { config } from "../config/config";
 
@@ -54,6 +54,20 @@ const SuggestFixRequestSchema = z.object({
     fileId:           z.string().min(1).max(500),
     connectedFileIds: z.array(z.string()).max(10).optional().default([]),
 });
+
+const ChatRequestSchema = z.object({
+    owner: z.string().min(1).max(100),
+    repo: z.string().min(1).max(100),
+    commitSha: z.string().min(1).max(200),
+    issueNumber: z.number().int().positive(),
+    fileId: z.string().min(1).max(500),
+    connectedFileIds: z.array(z.string()).max(5).optional().default([]),
+    messages: z.array(z.object({
+        role: z.enum(["user", "model"]),
+        content: z.string().max(2000),
+    })).min(1).max(20),
+});
+
 
 // ── Response types ────────────────────────────────────────────────────────────
 
@@ -141,6 +155,7 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
         }
 
         const comments = await fetchIssueComments(owner, repo, issueNumber, 20).catch(() => []);
+        const linkedPRs = await fetchLinkedPRs(owner, repo, issueNumber);
 
         console.log(`[issueMap] Fetched issue #${issueNumber}: ${issue.title} (${comments.length} comments)`);
 
@@ -185,18 +200,13 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
 
         if (deterministicConfidence < 70 && config.gemini.apiKey) {
             // Build context (no file contents available at this layer — that's Phase 2)
-            const issueContext = buildIssueContext(
-                { title: issue.title, body: issue.body, comments },
-                deterministicFiles,
-                new Map(), // no file contents in Phase 1
-            );
+            const issueContextInput = { title: issue.title, body: issue.body, comments, linkedPRs };
+            const keywordHints = deterministicFiles.map(f => f.fileId);
 
             const geminiResult = await callGeminiForMapping(
-                issueContext,
+                issueContextInput,
                 sortedFiles,
-                issueNumber,
-                issue.title,
-                { title: issue.title, body: issue.body, comments },
+                keywordHints
             );
 
             if (geminiResult) {
@@ -267,6 +277,85 @@ router.post("/suggest-fix", async (req: Request, res: Response) => {
         return res.status(400).json({ error: "Invalid request", details: result.error.issues });
     }
     return res.status(501).json({ error: "Fix suggestions coming soon" });
+});
+
+
+// ── POST /issue-map/chat ──────────────────────────────────────────────────────
+
+router.post("/chat", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+        const { owner, repo, commitSha, issueNumber, fileId, connectedFileIds, messages } = ChatRequestSchema.parse(req.body);
+
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+
+        const cacheKey = `issue-chat-ctx:${owner}:${repo}:${issueNumber}:${fileId}:${commitSha}`;
+        let systemContext = await redisConnection.get(cacheKey);
+
+        if (!systemContext) {
+            const [issue, comments, linkedPRs, primaryFileContent] = await Promise.all([
+                fetchIssue(owner, repo, issueNumber),
+                fetchIssueComments(owner, repo, issueNumber, 5),
+                fetchLinkedPRs(owner, repo, issueNumber),
+                fetchRawFile(owner, repo, commitSha, fileId)
+            ]);
+
+            const connectedContents = await Promise.all(
+                connectedFileIds.map((id: string) => fetchRawFile(owner, repo, commitSha, id).then((content: string) => ({ id, content })))
+            );
+
+            const issueTerms = [...new Set((issue.title + " " + issue.body).match(/\b([a-z][a-zA-Z0-9_]{2,}|[A-Z][a-zA-Z0-9_]{2,})\b/g) || [])];
+            const primaryTruncated = smartTruncate(primaryFileContent, issueTerms, 300);
+            
+            const connectedParts = connectedContents
+                .filter((c: any) => c.content)
+                .map((c: any) => `-- ${c.id} --\n${smartTruncate(c.content, issueTerms, 80)}`)
+                .join("\n\n");
+
+            const prLines = linkedPRs.map((pr: any) => 
+                `  PR #${pr.number} [${pr.merged ? 'MERGED' : pr.state.toUpperCase()}]: ${pr.title}\n  Changed files: ${pr.changedFiles.slice(0, 10).join(', ')}`
+            ).join("\n");
+
+            systemContext = [
+                `REPOSITORY: ${owner}/${repo}`,
+                `ISSUE #${issueNumber}: ${issue.title}`,
+                "",
+                "ISSUE DESCRIPTION:",
+                issue.body.slice(0, 600),
+                "",
+                "LINKED PULL REQUESTS:",
+                prLines || "None",
+                "",
+                `PRIMARY FILE: ${fileId}`,
+                primaryTruncated,
+                "",
+                connectedParts ? `CONNECTED FILES:\n${connectedParts}` : ""
+            ].join("\n");
+
+            await redisConnection.set(cacheKey, systemContext);
+        }
+
+        const result = await callGeminiForChatStream(systemContext, messages);
+        
+        for await (const chunk of result.stream) {
+            const text = chunk.text();
+            res.write(`data: ${JSON.stringify(text)}\n\n`);
+        }
+        
+        res.write("data: [DONE]\n\n");
+        res.end();
+    } catch (err) {
+        if (err instanceof z.ZodError) {
+            res.write(`data: ${JSON.stringify("[Error] Invalid request: " + err.message)}\n\n`);
+            res.write("data: [DONE]\n\n");
+            return res.end();
+        }
+        console.error("[issueMap chat] Error:", err);
+        res.write(`data: ${JSON.stringify("[Error] Failed to process chat request.")}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+    }
 });
 
 export default router;
