@@ -17,6 +17,7 @@
 
 import type {
     SearchIndex,
+    SearchIndexEntry,
     IssueMappingResult,
     CandidateFile,
     CandidateFunction,
@@ -178,5 +179,59 @@ export function mapIssueToCode(
         topFiles,
         topFunctions,
         confidenceScore,
+    };
+}
+
+// ── buildInlineSearchIndex ────────────────────────────────────────────────────
+
+/**
+ * Builds a SearchIndex directly from the file list sent in the request body.
+ *
+ * This avoids relying on a Redis-cached search index that may not exist for
+ * repos analyzed before this feature shipped. The result is a valid SearchIndex
+ * that mapIssueToCode() can use without returning empty results.
+ *
+ * Tokenization strategy:
+ *   - Split file id by non-alphanumeric chars → path segment tokens
+ *   - Split label by non-alphanumeric chars → label tokens
+ *   - Deduplicate, lowercase, drop single-char tokens
+ *
+ * SearchIndexEntry fields matched exactly to schema.ts:
+ *   id, type, name, filePath, tokens (required)
+ *   hubScore (optional — from architecturalImportance)
+ */
+export function buildInlineSearchIndex(
+    files: Array<{ id: string; label: string; architecturalImportance?: number }>,
+): SearchIndex {
+    const entries: SearchIndexEntry[] = files.map(f => {
+        const pathTokens = f.id
+            .replace(/[^a-zA-Z0-9]/g, " ")
+            .split(/\s+/)
+            .filter(t => t.length > 1)
+            .map(t => t.toLowerCase());
+
+        const labelTokens = f.label
+            .replace(/[^a-zA-Z0-9]/g, " ")
+            .split(/\s+/)
+            .filter(t => t.length > 1)
+            .map(t => t.toLowerCase());
+
+        const tokens = [...new Set([...pathTokens, ...labelTokens])];
+
+        const entry: SearchIndexEntry = {
+            id:       f.id,
+            type:     "file",
+            name:     f.label,
+            filePath: f.id,
+            tokens,
+            hubScore: f.architecturalImportance ?? 0,
+        };
+
+        return entry;
+    });
+
+    return {
+        entries,
+        generatedAt: new Date().toISOString(),
     };
 }

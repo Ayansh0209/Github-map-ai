@@ -9,7 +9,7 @@ import DetailsPanel from "./components/DetailsPanel";
 import StatsBar from "./components/StatsBar";
 import GraphControls from "./components/GraphControls";
 import SearchPanel from "./components/SearchPanel";
-import type { IssueFileContext } from "./components/SearchPanel";
+import IssueMapper from "./components/IssueMapper";
 import { useJobPolling } from "./hooks/useJobPolling";
 import { submitAnalysis } from "./lib/client";
 import type {
@@ -17,7 +17,7 @@ import type {
   FunctionNodeDTO,
   FunctionFilePayload,
   ViewMode,
-  IssueContext,
+  IssueMapResult,
 } from "./lib/types";
 
 export default function Home() {
@@ -39,9 +39,17 @@ export default function Home() {
   const [view, setView] = useState<ViewMode>("file-graph");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchPanelOpen, setSearchPanelOpen] = useState(false);
-  // Diagnose / issue mapping state
-  const [highlightedFiles, setHighlightedFiles] = useState<string[]>([]);
-  const [issueContext, setIssueContext] = useState<IssueContext | null>(null);
+
+  // ── Issue mapping state ────────────────────────────────────────────────────
+  const [issueResult, setIssueResult] = useState<IssueMapResult | null>(null);
+  const [isIssueLoading, setIsIssueLoading] = useState(false);
+  const [issueError, setIssueError] = useState<string | null>(null);
+
+  // Derived: Map<fileId, confidence> for the graph rings
+  const highlightedIssueFiles = issueResult
+    ? new Map(issueResult.affectedFiles.map(f => [f.fileId, f.confidence]))
+    : new Map<string, number>();
+
   const resetZoomRef = useRef<(() => void) | null>(null);
 
   const isLoading =
@@ -59,7 +67,7 @@ export default function Home() {
   const repo = result?.repo ?? "";
   const commitSha = result?.commitSha ?? "";
 
-  // ── Handlers ────────────────────────────────────────────────────────────
+  // ── Handlers ────────────────────────────────────────────────────────────────
 
   const handleSubmit = useCallback(
     async (repoUrl: string) => {
@@ -68,8 +76,8 @@ export default function Home() {
       setSelectedFunction(null);
       setView("file-graph");
       setSearchQuery("");
-      setHighlightedFiles([]);
-      setIssueContext(null);
+      setIssueResult(null);
+      setIssueError(null);
 
       try {
         const { jobId } = await submitAnalysis(repoUrl);
@@ -104,16 +112,13 @@ export default function Home() {
     []
   );
 
-  // Navigate directly to a function from Diagnose results
   const handleFunctionNavigateById = useCallback(
     (functionId: string, filePath: string) => {
       if (!functionFiles) return;
-      // find the function across all function payloads
       for (const payload of Object.values(functionFiles)) {
         const fn = payload.functions.find(f => f.id === functionId || f.filePath === filePath);
         if (fn) { setSelectedFunction(fn); setView("function-graph"); return; }
       }
-      // fallback: just navigate to the file
       const file = fileGraph?.files.find(f => f.id === filePath);
       if (file) setSelectedFile(file);
     },
@@ -123,7 +128,6 @@ export default function Home() {
   const handleFunctionNavigate = useCallback(
     (fn: FunctionNodeDTO) => {
       setSelectedFunction(fn);
-      // Stay in function-graph view
     },
     []
   );
@@ -149,10 +153,19 @@ export default function Home() {
   const handleBackToFile = useCallback(() => {
     setView("file-graph");
     setSelectedFunction(null);
-    // selectedFile stays intact — DetailsPanel reopens automatically
   }, []);
 
-  // ── URL param sync (state → URL) ──────────────────────────────────────────
+  const handleIssueResult = useCallback((result: IssueMapResult) => {
+    setIssueResult(result);
+    setIssueError(null);
+  }, []);
+
+  const handleIssueClear = useCallback(() => {
+    setIssueResult(null);
+    setIssueError(null);
+  }, []);
+
+  // ── URL param sync ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (!result?.owner) return;
     const params = new URLSearchParams();
@@ -162,7 +175,7 @@ export default function Home() {
     window.history.pushState({}, "", `${window.location.pathname}?${params.toString()}`);
   }, [owner, repo, selectedFile, selectedFunction, view, result]);
 
-  // ── popstate — browser back/forward ──────────────────────────────────────
+  // ── popstate — browser back/forward ───────────────────────────────────────
   useEffect(() => {
     const handler = () => {
       const params = new URLSearchParams(window.location.search);
@@ -187,23 +200,18 @@ export default function Home() {
     setView("file-graph");
     setSearchQuery("");
     setSearchPanelOpen(false);
-    setHighlightedFiles([]);
-    setIssueContext(null);
+    setIssueResult(null);
+    setIssueError(null);
   }, [reset]);
 
-  // ── Stable SearchPanel callbacks (must NOT be inline arrows to avoid infinite loops) ──
+  // ── SearchPanel callbacks ─────────────────────────────────────────────────
   const handleSearchPanelClose = useCallback(() => setSearchPanelOpen(false), []);
-  const handleSearchPanelSelectFile = useCallback((filePath: string, ctx?: IssueFileContext) => {
+  const handleSearchPanelSelectFile = useCallback((filePath: string) => {
     const file = fileGraph?.files.find((f) => f.id === filePath) ?? null;
     if (file) setSelectedFile(file);
-    if (ctx) setIssueContext(ctx);
   }, [fileGraph]);
-  const handleClearHighlight = useCallback(() => {
-    setHighlightedFiles([]);
-    setIssueContext(null);
-  }, []);
 
-  // ── Cmd+K keyboard shortcut for search panel ──────────────────────────────
+  // ── Cmd+K keyboard shortcut ───────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
@@ -214,6 +222,13 @@ export default function Home() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
+  // All functions from fileGraph for IssueMapper
+  const allFunctions = fileGraph
+    ? fileGraph.files.flatMap(f =>
+        (functionFiles?.[f.id.replace(/[^a-zA-Z0-9]/g, "_")] ?? functionFiles?.[f.id])?.functions ?? []
+      )
+    : [];
 
   return (
     <div className="flex flex-col min-h-screen gradient-bg">
@@ -352,12 +367,62 @@ export default function Home() {
         </section>
       )}
 
-      {/* ── Graph Section (shown when analysis is complete) ─────────────── */}
+      {/* ── Graph Section ────────────────────────────────────────────────── */}
       {isDone && fileGraph && (
         <section className="flex-1 px-6 pb-12">
           <StatsBar stats={fileGraph.stats} owner={owner} repo={repo} />
 
           <div className="max-w-[1600px] mx-auto">
+            {/* Issue Mapper — above graph controls */}
+            <div className="mb-3">
+              <IssueMapper
+                owner={owner}
+                repo={repo}
+                commitSha={commitSha}
+                files={fileGraph.files}
+                functions={allFunctions}
+                onResult={handleIssueResult}
+                onClear={handleIssueClear}
+                issueResult={issueResult}
+                isLoading={isIssueLoading}
+                error={issueError}
+                setLoading={setIsIssueLoading}
+                setError={setIssueError}
+              />
+
+              {/* Issue banner — shown when there's a result */}
+              {issueResult && (
+                <div
+                  className="flex items-center gap-3 px-4 py-2.5 rounded-xl mb-2 text-sm"
+                  style={{
+                    background: "rgba(249,115,22,0.08)",
+                    border: "1px solid rgba(249,115,22,0.2)",
+                  }}
+                >
+                  <span style={{ color: "#f97316" }}>🔍</span>
+                  <span style={{ color: "#e6edf3" }}>
+                    <strong style={{ color: "#f97316" }}>Issue #{issueResult.issueNumber}:</strong>{" "}
+                    {issueResult.issueTitle}
+                  </span>
+                  <span
+                    className="text-xs px-2 py-0.5 rounded ml-1"
+                    style={{ background: "rgba(249,115,22,0.15)", color: "#f97316" }}
+                  >
+                    {issueResult.affectedFiles.length} file{issueResult.affectedFiles.length !== 1 ? "s" : ""} affected
+                  </span>
+                  <button
+                    onClick={handleIssueClear}
+                    className="ml-auto text-xs transition-colors"
+                    style={{ color: "#8b949e" }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = "#e6edf3"; }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = "#8b949e"; }}
+                  >
+                    Clear ✕
+                  </button>
+                </div>
+              )}
+            </div>
+
             {/* Graph controls */}
             <GraphControls
               view={view}
@@ -382,7 +447,7 @@ export default function Home() {
                 searchQuery={searchQuery}
                 selectedFileId={selectedFile?.id ?? null}
                 resetZoomRef={resetZoomRef}
-                highlightedFiles={highlightedFiles}
+                highlightedIssueFiles={highlightedIssueFiles}
               />
             ) : selectedFunction && functionFiles ? (
               <FunctionGraph
@@ -440,7 +505,7 @@ export default function Home() {
         </section>
       )}
 
-      {/* ── Details Panel (slides in on file click) ────────────────────── */}
+      {/* ── Details Panel ──────────────────────────────────────────────── */}
       {isDone && fileGraph && (
         <DetailsPanel
           file={selectedFile}
@@ -452,11 +517,11 @@ export default function Home() {
           onClose={() => setSelectedFile(null)}
           onFileNavigate={handleFileNavigate}
           onFunctionClick={handleFunctionClick}
-          issueContext={issueContext}
+          issueResult={issueResult}
         />
       )}
 
-      {/* ── Search Panel (sidebar overlay) ──────────────────────────── */}
+      {/* ── Search Panel ───────────────────────────────────────────────── */}
       {isDone && fileGraph && (
         <SearchPanel
           isOpen={searchPanelOpen}
@@ -465,8 +530,6 @@ export default function Home() {
           repo={repo}
           onSelectFile={handleSearchPanelSelectFile}
           onSelectFunction={handleFunctionNavigateById}
-          onHighlightFiles={setHighlightedFiles}
-          onClearHighlight={handleClearHighlight}
         />
       )}
 

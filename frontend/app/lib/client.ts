@@ -20,9 +20,23 @@ export type {
   CandidateFile,
   CandidateFunction,
   IssueContext,
+  IssueMapResult,
+  IssueMapRequest,
+  AffectedFile,
+  AffectedFunction,
 } from "./types";
 
-import type { AnalyzeResponse, StatusResponse, SearchResponse, IssueMappingResult } from "./types";
+import type { AnalyzeResponse, StatusResponse, SearchResponse, IssueMappingResult, IssueMapRequest, IssueMapResult } from "./types";
+
+// ── Shared types ──────────────────────────────────────────────────────────────
+
+export type IssueSummary = {
+  number: number;
+  title: string;
+  htmlUrl: string;
+  labels: string[];
+  state: "open" | "closed";
+};
 
 // ── API calls ─────────────────────────────────────────────────────────────────
 
@@ -80,6 +94,35 @@ export async function searchIssues(
   const res = await fetch(`${API_BASE}/search/issues?${params}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Diagnose failed" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function mapIssue(request: IssueMapRequest): Promise<IssueMapResult> {
+  const res = await fetch(`${API_BASE}/issue-map/map`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Issue mapping failed" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchRepoIssues(
+  owner: string,
+  repo: string,
+): Promise<{ source: "cache" | "fresh"; issues: IssueSummary[] }> {
+  const res = await fetch(`${API_BASE}/issue-map/fetch-issues`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner, repo }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Failed to fetch issues" }));
     throw new Error(err.error || `HTTP ${res.status}`);
   }
   return res.json();

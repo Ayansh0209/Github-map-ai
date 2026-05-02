@@ -39,5 +39,9 @@ export const config = {
         maxConcurrentJobs: Number(process.env.MAX_CONCURRENT_JOBS || 3),
         maxQueueSize: Number(process.env.MAX_QUEUE_SIZE || 100),
         jobTimeoutMs: Number(process.env.JOB_TIMEOUT_MS || 600000),
-    }
+    },
+
+    gemini: {
+        apiKey: optional("GEMINI_API_KEY"),
+    },
 };

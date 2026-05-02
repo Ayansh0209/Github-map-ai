@@ -15,7 +15,7 @@ interface FileGraphProps {
   searchQuery: string;
   selectedFileId: string | null;
   resetZoomRef?: React.MutableRefObject<(() => void) | null>;
-  highlightedFiles?: string[]; // issue-mapped file paths — shown with amber ring
+  highlightedIssueFiles?: Map<string, number>; // fileId -> confidence (0-100)
 }
 
 interface SimNode extends d3.SimulationNodeDatum {
@@ -55,7 +55,7 @@ function trunc(s: string, max: number) {
 }
 
 export default function FileGraph({
-  files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef, highlightedFiles = [],
+  files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef, highlightedIssueFiles = new Map(),
 }: FileGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<d3.Selection<SVGSVGElement, unknown, null, undefined> | null>(null);
@@ -72,33 +72,44 @@ export default function FileGraph({
   useEffect(() => { onFileClickRef.current = onFileClick; }, [onFileClick]);
   useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
 
-  // ── Issue-highlight ring — driven by Diagnose results (DEBUG: bright red) ────
+  // ── Issue-highlight ring — orange rings sized by confidence ───────────────────
   useEffect(() => {
     if (!nodeGRef.current) return;
-    const highlightSet = new Set(highlightedFiles);
 
-    // DEBUG: log what we're trying to match
-    if (highlightSet.size > 0) {
-      const allNodeIds: string[] = [];
-      nodeGRef.current.each((d: SimNode) => allNodeIds.push(d.id));
-      console.log("[FileGraph] highlightedFiles:", [...highlightSet]);
-      console.log("[FileGraph] sample node IDs:", allNodeIds.slice(0, 5));
-      const matched = allNodeIds.filter(id => highlightSet.has(id));
-      console.log("[FileGraph] matched nodes:", matched.length, matched);
-    }
-
-    // selectAll clears rings on EVERY node group, not just the first
+    // Clear all rings first
     nodeGRef.current.selectAll<SVGCircleElement, SimNode>(".issue-ring")
       .attr("r", 0).attr("stroke-opacity", 0).attr("fill-opacity", 0);
-    if (highlightSet.size > 0) {
+
+    // Reset node colors back to normal
+    nodeGRef.current.selectAll<SVGCircleElement, SimNode>(".node-circle")
+      .attr("fill", d => {
+        if (d.data.isEntryPoint) return "#22c55e";
+        if (d.data.isDeadCode) return "#30363d";
+        return d.isHub ? brightenColor(getLanguageColor(d.data.language)) : getLanguageColor(d.data.language);
+      });
+
+    if (highlightedIssueFiles.size > 0) {
       nodeGRef.current
-        .filter((d: SimNode) => highlightSet.has(d.id))
+        .filter((d: SimNode) => highlightedIssueFiles.has(d.id))
         .select<SVGCircleElement>(".issue-ring")
-        .attr("r", (d: SimNode) => getRadius(d) + 12)
-        .attr("stroke-opacity", 1)
-        .attr("fill-opacity", 0.2);
+        .each(function(d: SimNode) {
+          const confidence = highlightedIssueFiles.get(d.id) ?? 50;
+          const strokeWidth = confidence >= 80 ? 3 : confidence >= 50 ? 2 : 1;
+          const opacity = confidence >= 80 ? 1.0 : confidence >= 50 ? 0.8 : 0.6;
+          d3.select(this)
+            .attr("r", getRadius(d) + 10)
+            .attr("stroke-width", strokeWidth)
+            .attr("stroke-opacity", opacity)
+            .attr("fill-opacity", 0.1);
+        });
+
+      // FOR DEBUGGING: Make the node itself completely RED
+      nodeGRef.current
+        .filter((d: SimNode) => highlightedIssueFiles.has(d.id))
+        .select<SVGCircleElement>(".node-circle")
+        .attr("fill", "#ff0000");
     }
-  }, [highlightedFiles]);
+  }, [highlightedIssueFiles]);
 
   // ── Selection ring — runs when selectedFileId changes, NO camera move ────────
   useEffect(() => {
@@ -244,10 +255,10 @@ export default function FileGraph({
       nodeG.each(function (d) {
         const g2 = d3.select(this);
         const r = getRadius(d);
-        // Issue highlight ring (amber — driven by Diagnose results)
+        // Issue highlight ring (orange — confidence-based thickness)
         g2.append("circle").attr("class", "issue-ring").attr("r", 0)
-          .attr("fill", "none").attr("stroke", "#f0ad00").attr("stroke-width", 2)
-          .attr("stroke-opacity", 0).attr("stroke-dasharray", "4,3").attr("pointer-events", "none");
+          .attr("fill", "rgba(249,115,22,0.1)").attr("stroke", "#f97316").attr("stroke-width", 2)
+          .attr("stroke-opacity", 0).attr("fill-opacity", 0).attr("pointer-events", "none");
         // Selection ring (orange, hidden by default)
         g2.append("circle").attr("class", "sel-ring").attr("r", 0)
           .attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 2.5)

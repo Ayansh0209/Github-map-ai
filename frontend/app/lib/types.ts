@@ -172,13 +172,51 @@ export interface IssueMappingResult {
   confidenceScore: number;
 }
 
+// ── Issue Mapping types (new /issue-map endpoint) ────────────────────────────
+
+export interface AffectedFile {
+  fileId: string;
+  confidence: number;  // 0-100
+  reason: string;      // one sentence
+}
+
+export interface AffectedFunction {
+  functionId: string;
+  filePath: string;
+  confidence: number;
+  reason: string;
+}
+
+export interface IssueMapResult {
+  issueNumber: number;
+  issueTitle: string;
+  issueBody: string;
+  issueUrl: string;
+  affectedFiles: AffectedFile[];
+  affectedFunctions: AffectedFunction[];
+  source: "cache" | "deterministic" | "ai";
+  overallConfidence: number;
+}
+
+export interface IssueMapRequest {
+  owner: string;
+  repo: string;
+  commitSha: string;
+  issueNumber: number;
+  graphData: {
+    files: Array<{ id: string; label: string; architecturalImportance: number }>;
+    functions: Array<{ id: string; name: string; filePath: string }>;
+  };
+}
+
 /**
- * Attached to a selected node when it was navigated from a Diagnose result.
- * Shown in DetailsPanel as the issue relevance sidebar context.
+ * Derived context passed to DetailsPanel when the selected file
+ * is part of an issue mapping result.
  */
 export interface IssueContext {
-  issueText: string;
-  relevanceScore: number;
-  matchedReasons: string[];
-  matchedKeywords: string[];
+  issueNumber: number;
+  issueTitle: string;
+  issueUrl: string;
+  confidence: number;
+  reason: string;
 }

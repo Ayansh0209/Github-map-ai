@@ -5,7 +5,7 @@ import type {
   ImportEdgeDTO,
   FunctionNodeDTO,
   FunctionFilePayload,
-  IssueContext,
+  IssueMapResult,
 } from "../lib/types";
 import {
   makeGitHubFileLink,
@@ -23,7 +23,7 @@ interface DetailsPanelProps {
   onClose: () => void;
   onFileNavigate: (fileId: string) => void;
   onFunctionClick: (fn: FunctionNodeDTO) => void;
-  issueContext?: IssueContext | null;
+  issueResult?: IssueMapResult | null;
 }
 
 export default function DetailsPanel({
@@ -36,7 +36,7 @@ export default function DetailsPanel({
   onClose,
   onFileNavigate,
   onFunctionClick,
-  issueContext,
+  issueResult,
 }: DetailsPanelProps) {
   if (!file) return null;
 
@@ -51,6 +51,9 @@ export default function DetailsPanel({
   const sanitizedId = sanitizeFileId(file.id);
   const functionData = functionFiles?.[sanitizedId] ?? null;
   const functions = functionData?.functions ?? [];
+
+  // ── Issue context for this file ─────────────────────────────────────────
+  const fileIssueHit = issueResult?.affectedFiles.find(f => f.fileId === file.id) ?? null;
 
   return (
     <div
@@ -107,45 +110,40 @@ export default function DetailsPanel({
 
       {/* Body */}
       <div className="p-4 space-y-5">
-        {issueContext && (
+        {/* RELATED ISSUE section — shown when file is in issue map result */}
+        {fileIssueHit && issueResult && (
           <section>
             <div className="rounded-xl p-3 space-y-2.5"
-              style={{ background: "rgba(240,173,0,0.06)", border: "1px solid rgba(240,173,0,0.25)" }}>
+              style={{ background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.25)" }}>
               <div className="flex items-center gap-2">
-                <span className="text-base">🩺</span>
-                <span className="text-xs font-semibold" style={{ color: "#f0ad00" }}>Diagnose Relevance</span>
+                <span className="text-base">🔍</span>
+                <span className="text-xs font-semibold" style={{ color: "#f97316" }}>Related Issue</span>
                 <span className="ml-auto text-[11px] font-bold px-2 py-0.5 rounded"
-                  style={{ background: "rgba(240,173,0,0.15)", color: "#f0ad00" }}>
-                  {issueContext.relevanceScore}%
+                  style={{ background: "rgba(249,115,22,0.15)", color: "#f97316" }}>
+                  {fileIssueHit.confidence}% match
                 </span>
               </div>
-              <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "#30363d" }}>
-                <div className="h-full rounded-full transition-all duration-500" style={{
-                  width: `${issueContext.relevanceScore}%`,
-                  background: issueContext.relevanceScore >= 70 ? "#22c55e" : issueContext.relevanceScore >= 40 ? "#f0ad00" : "#f85149",
-                }} />
+              <div>
+                <span className="text-[11px] font-semibold" style={{ color: "#8b949e" }}>#{issueResult.issueNumber}</span>
+                <p className="text-[12px] mt-0.5" style={{ color: "#e6edf3" }}>{issueResult.issueTitle}</p>
               </div>
-              <p className="text-[11px] italic" style={{ color: "#8b949e" }}>"{issueContext.issueText}"</p>
-              {issueContext.matchedKeywords.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {issueContext.matchedKeywords.slice(0, 8).map((kw, i) => (
-                    <span key={i} className="px-1.5 py-0.5 rounded-full text-[10px]"
-                      style={{ background: "rgba(88,166,255,0.1)", color: "#58a6ff", border: "1px solid rgba(88,166,255,0.2)" }}>
-                      {kw}
-                    </span>
-                  ))}
-                </div>
-              )}
-              {issueContext.matchedReasons.length > 0 && (
-                <div className="space-y-1">
-                  {issueContext.matchedReasons.slice(0, 3).map((r, i) => (
-                    <div key={i} className="text-[10px]" style={{ color: "#484f58" }}>↳ {r}</div>
-                  ))}
-                </div>
-              )}
+              <p className="text-[11px] italic" style={{ color: "#8b949e" }}>{fileIssueHit.reason}</p>
+              <a
+                href={issueResult.issueUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-80"
+                style={{ color: "#58a6ff" }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
+                </svg>
+                View Issue on GitHub
+              </a>
             </div>
           </section>
         )}
+
         {/* File info */}
         <section>
           <SectionHeader>File Info</SectionHeader>
@@ -162,17 +160,8 @@ export default function DetailsPanel({
               label="Entry Point"
               value={file.isEntryPoint ? "Yes" : "No"}
             />
-            {file.entryScore !== undefined && (
-              <InfoRow label="Entry Score" value={file.entryScore.toString()} />
-            )}
             {file.cycleScore !== undefined && file.cycleScore > 0 && (
               <InfoRow label="Cycle" value="⚠ Circular Dep" />
-            )}
-            {file.hubScore !== undefined && file.hubScore > 0 && (
-              <InfoRow label="Hub Score" value={file.hubScore.toString()} />
-            )}
-            {file.architecturalImportance !== undefined && file.architecturalImportance > 0 && (
-              <InfoRow label="Arch Weight" value={file.architecturalImportance.toString()} />
             )}
             {file.workspacePackage && (
               <InfoRow label="Package" value={file.workspacePackage} />
@@ -206,30 +195,6 @@ export default function DetailsPanel({
             </div>
           )}
         </section>
-
-        {/* ── ENTRY REASONS ───────────────────────────────────────────────── */}
-        {file.entryReasons && file.entryReasons.length > 0 && (
-          <section>
-            <SectionHeader>Entry Scoring Reasons</SectionHeader>
-            <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#0d1117", border: "1px solid #30363d" }}>
-              <ul className="list-disc list-inside space-y-1">
-                {[...file.entryReasons]
-                  .sort((a, b) => {
-                    const matchA = a.match(/^([+-]?\d+)/);
-                    const matchB = b.match(/^([+-]?\d+)/);
-                    const valA = matchA ? Math.abs(parseInt(matchA[1], 10)) : 0;
-                    const valB = matchB ? Math.abs(parseInt(matchB[1], 10)) : 0;
-                    return valB - valA;
-                  })
-                  .map((reason, i) => (
-                  <li key={i} style={{ color: reason.includes("-") ? "#f85149" : "#3fb950" }}>
-                    <span style={{ color: "#c9d1d9" }}>{reason}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </section>
-        )}
 
         {/* ── TEST INTELLIGENCE ───────────────────────────────────────────── */}
         {file.kind === "test" && (
