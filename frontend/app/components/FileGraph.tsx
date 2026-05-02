@@ -16,6 +16,8 @@ interface FileGraphProps {
   selectedFileId: string | null;
   resetZoomRef?: React.MutableRefObject<(() => void) | null>;
   highlightedIssueFiles?: Map<string, number>; // fileId -> confidence (0-100)
+  focusMode?: boolean;
+  zoomToNodeRef?: React.MutableRefObject<((fileId: string) => void) | null>;
 }
 
 interface SimNode extends d3.SimulationNodeDatum {
@@ -56,6 +58,7 @@ function trunc(s: string, max: number) {
 
 export default function FileGraph({
   files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef, highlightedIssueFiles = new Map(),
+  focusMode = false, zoomToNodeRef,
 }: FileGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<d3.Selection<SVGSVGElement, unknown, null, undefined> | null>(null);
@@ -102,14 +105,56 @@ export default function FileGraph({
             .attr("stroke-opacity", opacity)
             .attr("fill-opacity", 0.1);
         });
-
-      // FOR DEBUGGING: Make the node itself completely RED
-      nodeGRef.current
-        .filter((d: SimNode) => highlightedIssueFiles.has(d.id))
-        .select<SVGCircleElement>(".node-circle")
-        .attr("fill", "#ff0000");
     }
   }, [highlightedIssueFiles]);
+
+  // ── Focus mode — dim non-affected files ────────────────────────────────────────
+  useEffect(() => {
+    if (!nodeGRef.current || !linkRef.current) return;
+    if (focusMode && highlightedIssueFiles.size > 0) {
+      nodeGRef.current.attr("opacity", (d: SimNode) =>
+        highlightedIssueFiles.has(d.id) ? 1 : 0.15
+      );
+      linkRef.current.attr("stroke-opacity", 0.05);
+    } else {
+      nodeGRef.current.attr("opacity", 1);
+      linkRef.current.attr("stroke-opacity", (d: SimLink) => d.data.isCircular ? 1 : 0.7);
+    }
+  }, [focusMode, highlightedIssueFiles]);
+
+  // ── Zoom to node (exposed via ref) ────────────────────────────────────────────
+  useEffect(() => {
+    if (!zoomToNodeRef) return;
+    zoomToNodeRef.current = (fileId: string) => {
+      if (!simulationRef.current || !svgRef.current || !zoomRef.current) return;
+      const node = simulationRef.current.nodes().find(n => n.id === fileId);
+      if (!node || node.x == null || node.y == null) return;
+      const container = containerRef.current;
+      const w = container?.clientWidth || 900;
+      const h = container?.clientHeight || 600;
+      const scale = 2.5;
+      svgRef.current.transition().duration(600)
+        .call(zoomRef.current.transform,
+          d3.zoomIdentity.translate(w / 2 - node.x * scale, h / 2 - node.y * scale).scale(scale)
+        );
+    };
+  }, [zoomToNodeRef]);
+
+  // ── ResizeObserver — update center force when container resizes ────────────────
+  useEffect(() => {
+    if (!containerRef.current || !simulationRef.current) return;
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const { width: w, height: h } = entry.contentRect;
+        if (w > 0 && h > 0 && simulationRef.current) {
+          simulationRef.current.force("center", d3.forceCenter(w / 2, h / 2).strength(0.05));
+          simulationRef.current.alpha(0.1).restart();
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, [files]); // re-attach when graph rebuilds
 
   // ── Selection ring — runs when selectedFileId changes, NO camera move ────────
   useEffect(() => {
@@ -435,7 +480,7 @@ export default function FileGraph({
   }, [searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className="w-full relative" style={{ height: "75vh" }}>
+    <div className="w-full relative flex-1" style={{ height: "100%" }}>
       <div className="absolute bottom-4 left-4 z-10 border rounded-xl p-3 text-xs space-y-1.5"
         style={{ background: "rgba(13,17,23,0.92)", borderColor: "#30363d", pointerEvents: "none" }}>
         <div className="font-semibold mb-2" style={{ color: "#8b949e" }}>Legend</div>
@@ -466,8 +511,8 @@ export default function FileGraph({
           </div>
         </div>
       )}
-      <div ref={containerRef} className="w-full h-full rounded-2xl overflow-hidden"
-        style={{ background: "#0d1117", border: "1px solid #30363d" }} />
+      <div ref={containerRef} className="w-full h-full overflow-hidden"
+        style={{ background: "#0d1117" }} />
     </div>
   );
 }

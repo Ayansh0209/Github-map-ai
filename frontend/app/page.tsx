@@ -1,26 +1,14 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import InputBar from "./components/InputBar";
 import ProgressBar from "./components/ProgressBar";
-import FileGraph from "./components/FileGraph";
-import FunctionGraph from "./components/FunctionGraph";
-import DetailsPanel from "./components/DetailsPanel";
-import StatsBar from "./components/StatsBar";
-import GraphControls from "./components/GraphControls";
-import SearchPanel from "./components/SearchPanel";
-import IssueMapper from "./components/IssueMapper";
 import { useJobPolling } from "./hooks/useJobPolling";
 import { submitAnalysis } from "./lib/client";
-import type {
-  FileNodeDTO,
-  FunctionNodeDTO,
-  FunctionFilePayload,
-  ViewMode,
-  IssueMapResult,
-} from "./lib/types";
 
 export default function Home() {
+  const router = useRouter();
   const {
     status,
     progress,
@@ -33,52 +21,30 @@ export default function Home() {
   } = useJobPolling();
 
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [selectedFile, setSelectedFile] = useState<FileNodeDTO | null>(null);
-  const [selectedFunction, setSelectedFunction] =
-    useState<FunctionNodeDTO | null>(null);
-  const [view, setView] = useState<ViewMode>("file-graph");
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchPanelOpen, setSearchPanelOpen] = useState(false);
-
-  // ── Issue mapping state ────────────────────────────────────────────────────
-  const [issueResult, setIssueResult] = useState<IssueMapResult | null>(null);
-  const [isIssueLoading, setIsIssueLoading] = useState(false);
-  const [issueError, setIssueError] = useState<string | null>(null);
-
-  // Derived: Map<fileId, confidence> for the graph rings
-  const highlightedIssueFiles = issueResult
-    ? new Map(issueResult.affectedFiles.map(f => [f.fileId, f.confidence]))
-    : new Map<string, number>();
-
-  const resetZoomRef = useRef<(() => void) | null>(null);
 
   const isLoading =
     status === "submitting" ||
     status === "processing" ||
     status === "queued" ||
     status === "delayed";
-  const isDone = status === "done" && result?._inlineFileGraph;
 
-  // Extract data from result
-  const fileGraph = result?._inlineFileGraph ?? null;
-  const functionFiles: Record<string, FunctionFilePayload> | null =
-    result?._functionFiles ?? null;
-  const owner = result?.owner ?? "";
-  const repo = result?.repo ?? "";
-  const commitSha = result?.commitSha ?? "";
+  // ── Navigate to /repo on completion ─────────────────────────────────────────
+  useEffect(() => {
+    if (status === "done" && result?._inlineFileGraph) {
+      try {
+        sessionStorage.setItem("codemap-result", JSON.stringify(result));
+      } catch {}
+      const owner = result.owner || "";
+      const repo = result.repo || "";
+      router.push(`/repo?repo=${owner}/${repo}`);
+    }
+  }, [status, result, router]);
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
   const handleSubmit = useCallback(
     async (repoUrl: string) => {
       setSubmitError(null);
-      setSelectedFile(null);
-      setSelectedFunction(null);
-      setView("file-graph");
-      setSearchQuery("");
-      setIssueResult(null);
-      setIssueError(null);
-
       try {
         const { jobId } = await submitAnalysis(repoUrl);
         startPolling(jobId);
@@ -91,144 +57,10 @@ export default function Home() {
     [startPolling]
   );
 
-  const handleFileClick = useCallback((file: FileNodeDTO) => {
-    setSelectedFile(file);
-  }, []);
-
-  const handleFileNavigate = useCallback(
-    (fileId: string) => {
-      if (!fileGraph) return;
-      const file = fileGraph.files.find((f) => f.id === fileId);
-      if (file) setSelectedFile(file);
-    },
-    [fileGraph]
-  );
-
-  const handleFunctionClick = useCallback(
-    (fn: FunctionNodeDTO) => {
-      setSelectedFunction(fn);
-      setView("function-graph");
-    },
-    []
-  );
-
-  const handleFunctionNavigateById = useCallback(
-    (functionId: string, filePath: string) => {
-      if (!functionFiles) return;
-      for (const payload of Object.values(functionFiles)) {
-        const fn = payload.functions.find(f => f.id === functionId || f.filePath === filePath);
-        if (fn) { setSelectedFunction(fn); setView("function-graph"); return; }
-      }
-      const file = fileGraph?.files.find(f => f.id === filePath);
-      if (file) setSelectedFile(file);
-    },
-    [functionFiles, fileGraph]
-  );
-
-  const handleFunctionNavigate = useCallback(
-    (fn: FunctionNodeDTO) => {
-      setSelectedFunction(fn);
-    },
-    []
-  );
-
-  const handleBackToFileGraph = useCallback(() => {
-    setView("file-graph");
-    setSelectedFunction(null);
-  }, []);
-
-  const handleViewChange = useCallback(
-    (newView: ViewMode) => {
-      if (newView === "function-graph" && !selectedFunction) return;
-      setView(newView);
-    },
-    [selectedFunction]
-  );
-
-  const handleResetView = useCallback(() => {
-    setSearchQuery("");
-    resetZoomRef.current?.();
-  }, []);
-
-  const handleBackToFile = useCallback(() => {
-    setView("file-graph");
-    setSelectedFunction(null);
-  }, []);
-
-  const handleIssueResult = useCallback((result: IssueMapResult) => {
-    setIssueResult(result);
-    setIssueError(null);
-  }, []);
-
-  const handleIssueClear = useCallback(() => {
-    setIssueResult(null);
-    setIssueError(null);
-  }, []);
-
-  // ── URL param sync ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!result?.owner) return;
-    const params = new URLSearchParams();
-    params.set("repo", `${owner}/${repo}`);
-    if (selectedFile) params.set("file", selectedFile.id);
-    if (view === "function-graph" && selectedFunction) params.set("fn", selectedFunction.name);
-    window.history.pushState({}, "", `${window.location.pathname}?${params.toString()}`);
-  }, [owner, repo, selectedFile, selectedFunction, view, result]);
-
-  // ── popstate — browser back/forward ───────────────────────────────────────
-  useEffect(() => {
-    const handler = () => {
-      const params = new URLSearchParams(window.location.search);
-      const fileParam = params.get("file");
-      const fnParam = params.get("fn");
-      if (!fileParam) {
-        setSelectedFile(null); setSelectedFunction(null); setView("file-graph");
-      } else if (!fnParam) {
-        const f = fileGraph?.files.find(f => f.id === fileParam);
-        if (f) setSelectedFile(f);
-        setSelectedFunction(null); setView("file-graph");
-      }
-    };
-    window.addEventListener("popstate", handler);
-    return () => window.removeEventListener("popstate", handler);
-  }, [fileGraph]);
-
   const handleReset = useCallback(() => {
     reset();
-    setSelectedFile(null);
-    setSelectedFunction(null);
-    setView("file-graph");
-    setSearchQuery("");
-    setSearchPanelOpen(false);
-    setIssueResult(null);
-    setIssueError(null);
+    setSubmitError(null);
   }, [reset]);
-
-  // ── SearchPanel callbacks ─────────────────────────────────────────────────
-  const handleSearchPanelClose = useCallback(() => setSearchPanelOpen(false), []);
-  const handleSearchPanelSelectFile = useCallback((filePath: string) => {
-    const file = fileGraph?.files.find((f) => f.id === filePath) ?? null;
-    if (file) setSelectedFile(file);
-  }, [fileGraph]);
-
-  // ── Cmd+K keyboard shortcut ───────────────────────────────────────────────
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
-        e.preventDefault();
-        setSearchPanelOpen(prev => !prev);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
-
-  // All functions from fileGraph for IssueMapper
-  const allFunctions = fileGraph
-    ? fileGraph.files.flatMap(f =>
-        (functionFiles?.[f.id.replace(/[^a-zA-Z0-9]/g, "_")] ?? functionFiles?.[f.id])?.functions ?? []
-      )
-    : [];
 
   return (
     <div className="flex flex-col min-h-screen gradient-bg">
@@ -288,26 +120,19 @@ export default function Home() {
             />
           )}
 
-        {/* Completed progress */}
+        {/* Completed progress — shown briefly before redirect */}
         {status === "done" && (
           <ProgressBar progress={100} step="done" status="done" position={0} />
         )}
       </header>
 
-      {/* ── Feature Cards (shown when idle) ────────────────────────────── */}
-      {status === "idle" && (
+      {/* ── Feature Cards (shown when idle or failed) ──────────────────── */}
+      {(status === "idle" || status === "failed") && (
         <section className="max-w-5xl mx-auto px-6 pb-20 w-full">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <FeatureCard
               icon={
-                <svg
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
                   <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
                 </svg>
@@ -317,14 +142,7 @@ export default function Home() {
             />
             <FeatureCard
               icon={
-                <svg
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path d="M8 3H5a2 2 0 00-2 2v3M21 8V5a2 2 0 00-2-2h-3M3 16v3a2 2 0 002 2h3M16 21h3a2 2 0 002-2v-3" />
                   <circle cx="12" cy="12" r="4" />
                 </svg>
@@ -334,14 +152,7 @@ export default function Home() {
             />
             <FeatureCard
               icon={
-                <svg
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71" />
                   <path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71" />
                 </svg>
@@ -367,174 +178,8 @@ export default function Home() {
         </section>
       )}
 
-      {/* ── Graph Section ────────────────────────────────────────────────── */}
-      {isDone && fileGraph && (
-        <section className="flex-1 px-6 pb-12">
-          <StatsBar stats={fileGraph.stats} owner={owner} repo={repo} />
-
-          <div className="max-w-[1600px] mx-auto">
-            {/* Issue Mapper — above graph controls */}
-            <div className="mb-3">
-              <IssueMapper
-                owner={owner}
-                repo={repo}
-                commitSha={commitSha}
-                files={fileGraph.files}
-                functions={allFunctions}
-                onResult={handleIssueResult}
-                onClear={handleIssueClear}
-                issueResult={issueResult}
-                isLoading={isIssueLoading}
-                error={issueError}
-                setLoading={setIsIssueLoading}
-                setError={setIssueError}
-              />
-
-              {/* Issue banner — shown when there's a result */}
-              {issueResult && (
-                <div
-                  className="flex items-center gap-3 px-4 py-2.5 rounded-xl mb-2 text-sm"
-                  style={{
-                    background: "rgba(249,115,22,0.08)",
-                    border: "1px solid rgba(249,115,22,0.2)",
-                  }}
-                >
-                  <span style={{ color: "#f97316" }}>🔍</span>
-                  <span style={{ color: "#e6edf3" }}>
-                    <strong style={{ color: "#f97316" }}>Issue #{issueResult.issueNumber}:</strong>{" "}
-                    {issueResult.issueTitle}
-                  </span>
-                  <span
-                    className="text-xs px-2 py-0.5 rounded ml-1"
-                    style={{ background: "rgba(249,115,22,0.15)", color: "#f97316" }}
-                  >
-                    {issueResult.affectedFiles.length} file{issueResult.affectedFiles.length !== 1 ? "s" : ""} affected
-                  </span>
-                  <button
-                    onClick={handleIssueClear}
-                    className="ml-auto text-xs transition-colors"
-                    style={{ color: "#8b949e" }}
-                    onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = "#e6edf3"; }}
-                    onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = "#8b949e"; }}
-                  >
-                    Clear ✕
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Graph controls */}
-            <GraphControls
-              view={view}
-              searchQuery={searchQuery}
-              onSearchChange={setSearchQuery}
-              onViewChange={handleViewChange}
-              onResetView={handleResetView}
-              onSearchOpen={() => setSearchPanelOpen(true)}
-              fileCount={fileGraph.files.length}
-              edgeCount={fileGraph.importEdges.length}
-              hasFunctionSelected={!!selectedFunction}
-            />
-
-            {/* Conditional graph rendering */}
-            {view === "file-graph" ? (
-              <FileGraph
-                files={fileGraph.files}
-                edges={fileGraph.importEdges}
-                onFileClick={handleFileClick}
-                owner={owner}
-                repo={repo}
-                searchQuery={searchQuery}
-                selectedFileId={selectedFile?.id ?? null}
-                resetZoomRef={resetZoomRef}
-                highlightedIssueFiles={highlightedIssueFiles}
-              />
-            ) : selectedFunction && functionFiles ? (
-              <FunctionGraph
-                selectedFunction={selectedFunction}
-                functionFiles={functionFiles}
-                owner={owner}
-                repo={repo}
-                commitSha={commitSha}
-                onFunctionNavigate={handleFunctionNavigate}
-                onBackToFileGraph={handleBackToFileGraph}
-                onBackToFile={handleBackToFile}
-              />
-            ) : (
-              <div
-                className="flex items-center justify-center rounded-2xl"
-                style={{
-                  height: "75vh",
-                  background: "#0d1117",
-                  border: "1px solid #30363d",
-                  color: "#484f58",
-                }}
-              >
-                <div className="text-center">
-                  <p className="text-lg mb-2">No function selected</p>
-                  <p className="text-sm">
-                    Click a file in the graph, then click a function to see its
-                    call graph.
-                  </p>
-                  <button
-                    onClick={handleBackToFileGraph}
-                    className="mt-4 px-4 py-2 rounded-lg text-sm"
-                    style={{
-                      background: "#1c2128",
-                      border: "1px solid #30363d",
-                      color: "#8b949e",
-                    }}
-                  >
-                    Back to file graph
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* New analysis button */}
-          <div className="text-center mt-6">
-            <button
-              id="new-analysis-btn"
-              onClick={handleReset}
-              className="text-sm text-muted hover:text-foreground transition-colors underline underline-offset-4"
-            >
-              Analyze another repository
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* ── Details Panel ──────────────────────────────────────────────── */}
-      {isDone && fileGraph && (
-        <DetailsPanel
-          file={selectedFile}
-          edges={fileGraph.importEdges}
-          owner={owner}
-          repo={repo}
-          commitSha={commitSha}
-          functionFiles={functionFiles}
-          onClose={() => setSelectedFile(null)}
-          onFileNavigate={handleFileNavigate}
-          onFunctionClick={handleFunctionClick}
-          issueResult={issueResult}
-        />
-      )}
-
-      {/* ── Search Panel ───────────────────────────────────────────────── */}
-      {isDone && fileGraph && (
-        <SearchPanel
-          isOpen={searchPanelOpen}
-          onClose={handleSearchPanelClose}
-          owner={owner}
-          repo={repo}
-          onSelectFile={handleSearchPanelSelectFile}
-          onSelectFunction={handleFunctionNavigateById}
-        />
-      )}
-
       {/* ── Footer ─────────────────────────────────────────────────────── */}
-      <footer className="py-6 text-center text-xs text-muted/40 border-t border-border/30">
+      <footer className="mt-auto py-6 text-center text-xs text-muted/40 border-t border-border/30">
         CodeMap AI · Deterministic codebase analysis · No AI hallucinations
       </footer>
     </div>

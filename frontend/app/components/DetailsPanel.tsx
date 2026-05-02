@@ -12,6 +12,7 @@ import {
   getKindBadge,
   sanitizeFileId,
 } from "../lib/graphHelpers";
+import CodeViewer from "./CodeViewer";
 
 interface DetailsPanelProps {
   file: FileNodeDTO | null;
@@ -24,6 +25,14 @@ interface DetailsPanelProps {
   onFileNavigate: (fileId: string) => void;
   onFunctionClick: (fn: FunctionNodeDTO) => void;
   issueResult?: IssueMapResult | null;
+  // Code viewer
+  codeContent?: string | null;
+  onViewSource?: () => void;
+  isLoadingCode?: boolean;
+  codeMaxLines?: number;
+  onLoadMoreCode?: () => void;
+  // Chat
+  onOpenChat?: (fileId: string) => void;
 }
 
 export default function DetailsPanel({
@@ -37,6 +46,12 @@ export default function DetailsPanel({
   onFileNavigate,
   onFunctionClick,
   issueResult,
+  codeContent,
+  onViewSource,
+  isLoadingCode,
+  codeMaxLines = 200,
+  onLoadMoreCode,
+  onOpenChat,
 }: DetailsPanelProps) {
   if (!file) return null;
 
@@ -57,16 +72,14 @@ export default function DetailsPanel({
 
   return (
     <div
-      className="fixed right-0 top-0 h-full z-40 overflow-y-auto shadow-2xl"
+      className="h-full overflow-y-auto"
       style={{
-        width: "340px",
         background: "#161b22",
-        borderLeft: "1px solid #30363d",
       }}
     >
       {/* Header */}
       <div
-        className="sticky top-0 backdrop-blur p-4 flex items-start justify-between gap-3"
+        className="sticky top-0 backdrop-blur p-4 flex items-start justify-between gap-3 z-10"
         style={{
           background: "rgba(22,27,34,0.95)",
           borderBottom: "1px solid #30363d",
@@ -140,6 +153,19 @@ export default function DetailsPanel({
                 </svg>
                 View Issue on GitHub
               </a>
+              {onOpenChat && (
+                <button
+                  onClick={() => onOpenChat(file.id)}
+                  className="flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-80 mt-1"
+                  style={{ color: "#a855f7" }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 2a10 10 0 1 0 10 10H12V2Z" />
+                    <path d="M12 12l8.5-5" />
+                  </svg>
+                  Ask AI about this
+                </button>
+              )}
             </div>
           </section>
         )}
@@ -195,6 +221,43 @@ export default function DetailsPanel({
             </div>
           )}
         </section>
+
+        {/* View Source button */}
+        {onViewSource && (
+          <section>
+            <button
+              onClick={onViewSource}
+              disabled={isLoadingCode}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-medium transition-colors hover:opacity-90 disabled:opacity-40"
+              style={{ background: "#1c2128", border: "1px solid #30363d", color: "#e6edf3" }}
+            >
+              {isLoadingCode ? (
+                <span className="inline-block w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: "#58a6ff", borderTopColor: "transparent" }} />
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M16 18l6-6-6-6M8 6l-6 6 6 6" />
+                </svg>
+              )}
+              {codeContent ? "Hide Source" : "{ } View Source"}
+            </button>
+          </section>
+        )}
+
+        {/* Code Viewer */}
+        {codeContent && (
+          <section>
+            <CodeViewer
+              code={codeContent}
+              filePath={file.path}
+              language={file.language}
+              maxLines={codeMaxLines}
+              onLoadMore={onLoadMoreCode}
+              hasMore={codeContent.split("\n").length > codeMaxLines}
+              title={file.label}
+              maxHeight="400px"
+            />
+          </section>
+        )}
 
         {/* ── TEST INTELLIGENCE ───────────────────────────────────────────── */}
         {file.kind === "test" && (

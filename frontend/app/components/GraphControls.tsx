@@ -12,6 +12,9 @@ interface GraphControlsProps {
   fileCount: number;
   edgeCount: number;
   hasFunctionSelected: boolean;
+  focusMode?: boolean;
+  onFocusModeToggle?: () => void;
+  hasIssueResult?: boolean;
 }
 
 export default function GraphControls({
@@ -24,6 +27,9 @@ export default function GraphControls({
   fileCount,
   edgeCount,
   hasFunctionSelected,
+  focusMode = false,
+  onFocusModeToggle,
+  hasIssueResult = false,
 }: GraphControlsProps) {
   return (
     <div
@@ -150,6 +156,21 @@ export default function GraphControls({
           <span>🔍</span>
           <span>Search</span>
           <span className="text-[10px] px-1 rounded" style={{ background: "rgba(88,166,255,0.12)", color: "#58a6ff" }}>⌘K</span>
+        </button>
+      )}
+
+      {/* Focus Mode Toggle */}
+      {hasIssueResult && onFocusModeToggle && (
+        <button
+          onClick={onFocusModeToggle}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80 flex items-center gap-1.5"
+          style={{
+            background: focusMode ? "rgba(249,115,22,0.15)" : "#161b22",
+            border: `1px solid ${focusMode ? "rgba(249,115,22,0.3)" : "#30363d"}`,
+            color: focusMode ? "#f97316" : "#8b949e",
+          }}
+        >
+          {focusMode ? "Show all files" : "Focus on affected"}
         </button>
       )}
 
