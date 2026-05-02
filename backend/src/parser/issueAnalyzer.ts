@@ -116,7 +116,7 @@ export async function callGeminiForMapping(
     }
 
     const model = client.getGenerativeModel({
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         systemInstruction:
             "You are a senior software engineer helping contributors " +
             "navigate a codebase to fix a GitHub issue. " +
@@ -196,19 +196,54 @@ Return JSON:
 
     const fileIdSet = new Set(files.map((f) => f.id));
 
+    console.log(`\n[issueAnalyzer] ----------------------------------------------------`);
+    console.log(`[issueAnalyzer] Sending request to Gemini for issue: "${issue.title}"`);
+    console.log(`[issueAnalyzer] Technical terms detected: ${technicalTerms.length}`);
+    console.log(`[issueAnalyzer] Files provided in context: ${files.length}`);
+    console.log(`[issueAnalyzer] Linked PRs: ${issue.linkedPRs.length}, Comments: ${issue.comments.length}`);
+    console.log(`[issueAnalyzer] ----------------------------------------------------\n`);
+
     try {
         const result = await model.generateContent(prompt);
         const text = result.response.text();
+        
+        console.log(`[issueAnalyzer] Gemini response received. Length: ${text.length} chars.`);
+        console.log(`[issueAnalyzer] Raw response:\n${text}\n`);
+
         const cleaned = text.replace(/```json\s*|```\s*/g, "").trim();
         const parsed = JSON.parse(cleaned);
 
-        const affectedFiles: AffectedFile[] = (parsed.affectedFiles ?? [])
-            .filter((f: AffectedFile) => fileIdSet.has(f.fileId))
-            .map((f: AffectedFile) => ({
-                fileId: f.fileId,
-                confidence: Math.max(0, Math.min(100, Math.round(Number(f.confidence) || 0))),
-                reason: String(f.reason ?? "").slice(0, 300),
-            }));
+        console.log(`[issueAnalyzer] Parsed JSON successfully. Found ${parsed.affectedFiles?.length || 0} candidate files.`);
+
+        const affectedFiles: AffectedFile[] = [];
+        const fileIdArray = Array.from(fileIdSet);
+        
+        for (const f of parsed.affectedFiles ?? []) {
+            let targetId = String(f.fileId).replace(/^\/+/, ''); // strip leading slash
+            
+            // Try exact match first
+            let matchedId = fileIdSet.has(targetId) ? targetId : null;
+            
+            // Try case-insensitive or ending match
+            if (!matchedId) {
+                const lowerTarget = targetId.toLowerCase();
+                matchedId = fileIdArray.find(id => id.toLowerCase() === lowerTarget || id.toLowerCase().endsWith('/' + lowerTarget)) || null;
+            }
+
+            if (matchedId) {
+                affectedFiles.push({
+                    fileId: matchedId,
+                    confidence: Math.max(0, Math.min(100, Math.round(Number(f.confidence) || 0))),
+                    reason: String(f.reason ?? "").slice(0, 300),
+                });
+            }
+        }
+
+        console.log(`[issueAnalyzer] After filtering by valid file IDs, ${affectedFiles.length} files remain.`);
+        if (affectedFiles.length === 0) {
+            console.log(`[issueAnalyzer] WARNING: Gemini returned files that don't match the repository file tree!`);
+            console.log(`[issueAnalyzer] Gemini returned:`, parsed.affectedFiles);
+        }
 
         return {
             affectedFiles,
@@ -216,7 +251,7 @@ Return JSON:
             fixApproach: String(parsed.fixApproach ?? "").slice(0, 300),
         };
     } catch (err) {
-        console.error("[issueAnalyzer] Gemini mapping failed:", err);
+        console.error("[issueAnalyzer] Gemini mapping failed with error:", err);
         return null;
     }
 }
@@ -233,7 +268,7 @@ export async function callGeminiForFix(
     if (!client) return null;
 
     const model = client.getGenerativeModel({
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         systemInstruction:
             "You are a senior software engineer. Given a GitHub issue and source code, " +
             "provide the minimal precise code change to fix the issue. " +
@@ -310,7 +345,7 @@ export async function callGeminiForChatStream(
     if (!client) throw new Error("Gemini API key not configured");
 
     const model = client.getGenerativeModel({
-        model: "gemini-2.0-flash",
+        model: "gemini-2.5-flash",
         systemInstruction,
         generationConfig: { temperature: 0.2 },
     });

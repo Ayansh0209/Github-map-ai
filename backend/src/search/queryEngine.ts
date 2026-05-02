@@ -176,10 +176,15 @@ export function searchIndex(
         }
 
         // All query tokens must match at least partially (AND semantics) for exact searches,
-        // but for natural language issues we want a relaxed OR with strong threshold
-        // We require at least 50% of query tokens to match to consider it.
+        // but for natural language issues we want a relaxed OR.
+        // For short user searches (1-3 tokens), require high match ratio.
+        // For long issue descriptions, matching even 1 or 2 relevant tokens is enough to score.
         const matchRatio = matchedTokens.size / queryTokens.length;
-        if (matchRatio < 0.5) continue;
+        if (queryTokens.length <= 3) {
+            if (matchRatio < 0.5) continue;
+        } else {
+            if (matchedTokens.size < 1) continue;
+        }
 
         // Base token score normalized to 60 points max
         let score = (totalScore / queryTokens.length) * 60;
