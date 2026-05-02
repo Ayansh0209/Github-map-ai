@@ -228,7 +228,8 @@ export default function FunctionGraph({
           <div
             className="rounded-xl p-5 text-center relative"
             style={{
-              width: "220px",
+              minWidth: "220px",
+              maxWidth: "100%",
               background: "#1c2128",
               border: "2px solid #f0883e",
               boxShadow: "0 0 20px rgba(240,136,62,0.15)",
@@ -258,7 +259,7 @@ export default function FunctionGraph({
 
             {/* Function name */}
             <div
-              className="text-base font-bold mb-1"
+              className="text-base font-bold mb-1 break-all"
               style={{
                 color: "#e6edf3",
                 fontFamily: "var(--font-geist-mono), monospace",
