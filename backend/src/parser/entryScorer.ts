@@ -131,6 +131,14 @@ const ENTRY_STEMS = new Set([
     "cli", "bin",
 ]);
 
+/**
+ * Next.js app router semantic files.
+ * These are inherently entry points for specific routes/layouts.
+ */
+const NEXTJS_SEMANTIC_STEMS = new Set([
+    "page", "layout", "route", "loading", "error", "middleware"
+]);
+
 // ── Score input ───────────────────────────────────────────────────────────────
 
 export interface ScoringInput {
@@ -208,6 +216,8 @@ function scoreFile(input: ScoringInput): ScoringResult {
     const stem = path.basename(filePath, path.extname(filePath)).toLowerCase();
     if (ENTRY_STEMS.has(stem)) {
         add(15, `entry filename stem "${stem}"`);
+    } else if (NEXTJS_SEMANTIC_STEMS.has(stem)) {
+        add(15, `Next.js semantic file "${stem}"`);
     }
 
     // ── Bonus: root depth ─────────────────────────────────────────────────────

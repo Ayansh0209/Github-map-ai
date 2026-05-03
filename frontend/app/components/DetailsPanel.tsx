@@ -5,12 +5,14 @@ import type {
   ImportEdgeDTO,
   FunctionNodeDTO,
   FunctionFilePayload,
+  IssueMapResult,
 } from "../lib/types";
 import {
   makeGitHubFileLink,
   getKindBadge,
   sanitizeFileId,
 } from "../lib/graphHelpers";
+import CodeViewer from "./CodeViewer";
 
 interface DetailsPanelProps {
   file: FileNodeDTO | null;
@@ -22,6 +24,15 @@ interface DetailsPanelProps {
   onClose: () => void;
   onFileNavigate: (fileId: string) => void;
   onFunctionClick: (fn: FunctionNodeDTO) => void;
+  issueResult?: IssueMapResult | null;
+  // Code viewer
+  codeContent?: string | null;
+  onViewSource?: () => void;
+  isLoadingCode?: boolean;
+  codeMaxLines?: number;
+  onLoadMoreCode?: () => void;
+  // Chat
+  onOpenChat?: (fileId: string) => void;
 }
 
 export default function DetailsPanel({
@@ -34,6 +45,13 @@ export default function DetailsPanel({
   onClose,
   onFileNavigate,
   onFunctionClick,
+  issueResult,
+  codeContent,
+  onViewSource,
+  isLoadingCode,
+  codeMaxLines = 200,
+  onLoadMoreCode,
+  onOpenChat,
 }: DetailsPanelProps) {
   if (!file) return null;
 
@@ -49,18 +67,19 @@ export default function DetailsPanel({
   const functionData = functionFiles?.[sanitizedId] ?? null;
   const functions = functionData?.functions ?? [];
 
+  // ── Issue context for this file ─────────────────────────────────────────
+  const fileIssueHit = issueResult?.affectedFiles.find(f => f.fileId === file.id) ?? null;
+
   return (
     <div
-      className="fixed right-0 top-0 h-full z-40 overflow-y-auto shadow-2xl"
+      className="h-full overflow-y-auto"
       style={{
-        width: "340px",
         background: "#161b22",
-        borderLeft: "1px solid #30363d",
       }}
     >
       {/* Header */}
       <div
-        className="sticky top-0 backdrop-blur p-4 flex items-start justify-between gap-3"
+        className="sticky top-0 backdrop-blur p-4 flex items-start justify-between gap-3 z-10"
         style={{
           background: "rgba(22,27,34,0.95)",
           borderBottom: "1px solid #30363d",
@@ -104,6 +123,53 @@ export default function DetailsPanel({
 
       {/* Body */}
       <div className="p-4 space-y-5">
+        {/* RELATED ISSUE section — shown when file is in issue map result */}
+        {fileIssueHit && issueResult && (
+          <section>
+            <div className="rounded-xl p-3 space-y-2.5"
+              style={{ background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.25)" }}>
+              <div className="flex items-center gap-2">
+                <span className="text-base">🔍</span>
+                <span className="text-xs font-semibold" style={{ color: "#f97316" }}>Related Issue</span>
+                <span className="ml-auto text-[11px] font-bold px-2 py-0.5 rounded"
+                  style={{ background: "rgba(249,115,22,0.15)", color: "#f97316" }}>
+                  {fileIssueHit.confidence}% match
+                </span>
+              </div>
+              <div>
+                <span className="text-[11px] font-semibold" style={{ color: "#8b949e" }}>#{issueResult.issueNumber}</span>
+                <p className="text-[12px] mt-0.5" style={{ color: "#e6edf3" }}>{issueResult.issueTitle}</p>
+              </div>
+              <p className="text-[11px] italic" style={{ color: "#8b949e" }}>{fileIssueHit.reason}</p>
+              <a
+                href={issueResult.issueUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-80"
+                style={{ color: "#58a6ff" }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3" />
+                </svg>
+                View Issue on GitHub
+              </a>
+              {onOpenChat && (
+                <button
+                  onClick={() => onOpenChat(file.id)}
+                  className="flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-80 mt-1"
+                  style={{ color: "#a855f7" }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 2a10 10 0 1 0 10 10H12V2Z" />
+                    <path d="M12 12l8.5-5" />
+                  </svg>
+                  Ask AI about this
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* File info */}
         <section>
           <SectionHeader>File Info</SectionHeader>
@@ -120,24 +186,113 @@ export default function DetailsPanel({
               label="Entry Point"
               value={file.isEntryPoint ? "Yes" : "No"}
             />
-            {file.entryScore !== undefined && (
-              <InfoRow label="Entry Score" value={file.entryScore.toString()} />
+            {file.cycleScore !== undefined && file.cycleScore > 0 && (
+              <InfoRow label="Cycle" value="⚠ Circular Dep" />
+            )}
+            {file.workspacePackage && (
+              <InfoRow label="Package" value={file.workspacePackage} />
             )}
           </div>
+          {/* Subtle dead code indicator — only shown when file has meaningful dead score */}
+          {file.isDeadCode && (
+            <div className="mt-2 rounded-lg px-3 py-2 text-xs flex items-center gap-2"
+              style={{ background: "rgba(248,81,73,0.08)", border: "1px dashed rgba(248,81,73,0.3)" }}>
+              <span style={{ opacity: 0.7 }}>💀</span>
+              <span style={{ color: "#f85149", fontWeight: 600 }}>Potential dead code</span>
+              <span style={{ color: "#8b949e", marginLeft: "auto" }}>score: {file.deadCodeScore ?? 0}</span>
+            </div>
+          )}
+          {/* Unused exports — subtle list */}
+          {file.unusedExports && file.unusedExports.length > 0 && (
+            <div className="mt-2 rounded-lg px-3 py-2 text-xs"
+              style={{ background: "rgba(240,136,62,0.06)", border: "1px dashed rgba(240,136,62,0.25)" }}>
+              <div style={{ color: "#f0883e", fontWeight: 600, marginBottom: "4px" }}>
+                Unused Exports ({file.unusedExports.length})
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {file.unusedExports.map((exp, i) => (
+                  <span key={i} className="px-1.5 py-0.5 rounded text-[10px]"
+                    style={{ background: "rgba(240,136,62,0.12)", color: "#f0883e",
+                      fontFamily: "var(--font-geist-mono), monospace" }}>
+                    {exp}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
         </section>
 
-        {/* ── ENTRY REASONS ───────────────────────────────────────────────── */}
-        {file.entryReasons && file.entryReasons.length > 0 && (
+        {/* View Source button */}
+        {onViewSource && (
           <section>
-            <SectionHeader>Entry Scoring Reasons</SectionHeader>
-            <div className="rounded-lg p-3 text-xs space-y-1" style={{ background: "#0d1117", border: "1px solid #30363d" }}>
-              <ul className="list-disc list-inside space-y-1">
-                {file.entryReasons.map((reason, i) => (
-                  <li key={i} style={{ color: reason.includes("-") ? "#f85149" : "#3fb950" }}>
-                    <span style={{ color: "#c9d1d9" }}>{reason}</span>
-                  </li>
-                ))}
-              </ul>
+            <button
+              onClick={onViewSource}
+              disabled={isLoadingCode}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-medium transition-colors hover:opacity-90 disabled:opacity-40"
+              style={{ background: "#1c2128", border: "1px solid #30363d", color: "#e6edf3" }}
+            >
+              {isLoadingCode ? (
+                <span className="inline-block w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: "#58a6ff", borderTopColor: "transparent" }} />
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M16 18l6-6-6-6M8 6l-6 6 6 6" />
+                </svg>
+              )}
+              {codeContent ? "Hide Source" : "{ } View Source"}
+            </button>
+          </section>
+        )}
+
+        {/* Code Viewer */}
+        {codeContent && (
+          <section>
+            <CodeViewer
+              code={codeContent}
+              filePath={file.path}
+              language={file.language}
+              maxLines={codeMaxLines}
+              onLoadMore={onLoadMoreCode}
+              hasMore={codeContent.split("\n").length > codeMaxLines}
+              title={file.label}
+              maxHeight="400px"
+            />
+          </section>
+        )}
+
+        {/* ── TEST INTELLIGENCE ───────────────────────────────────────────── */}
+        {file.kind === "test" && (
+          <section>
+            <SectionHeader>Test Intelligence</SectionHeader>
+            <div className="rounded-lg p-3 text-xs space-y-3" style={{ background: "#0d1117", border: "1px dashed #3fb950" }}>
+              <div className="flex gap-4">
+                <div>
+                  <span style={{ color: "#8b949e", fontWeight: 600 }}>TEST SUITES </span>
+                  <span style={{ color: "#e6edf3", fontWeight: 700 }}>({file.testSuites?.length || 0})</span>
+                </div>
+                <div>
+                  <span style={{ color: "#8b949e", fontWeight: 600 }}>TEST CASES </span>
+                  <span style={{ color: "#e6edf3", fontWeight: 700 }}>({file.testCases?.length || 0})</span>
+                </div>
+              </div>
+
+              {outgoing.filter(e => e.isTestCoverage).length > 0 && (
+                <div>
+                  <div style={{ color: "#8b949e", fontWeight: 600, marginBottom: "4px" }}>COVERS:</div>
+                  <ul className="space-y-1">
+                    {outgoing.filter(e => e.isTestCoverage).map((e, i) => (
+                      <li key={i}>
+                        <button
+                          className="w-full text-left truncate hover:underline"
+                          style={{ color: "#58a6ff", fontFamily: "var(--font-geist-mono), monospace" }}
+                          onClick={() => onFileNavigate(e.target)}
+                        >
+                          {e.target}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
             </div>
           </section>
         )}
@@ -206,7 +361,7 @@ export default function DetailsPanel({
                       color: "#e6edf3",
                     }}
                   >
-                    {getKindBadge(fn.kind)}
+                    {fn.name.startsWith("describe") ? "suite" : (fn.name.startsWith("it") || fn.name.startsWith("test(")) ? "test case" : getKindBadge(fn.kind)}
                   </span>
 
                   {/* Line range */}
@@ -281,6 +436,22 @@ export default function DetailsPanel({
                         type
                       </span>
                     )}
+                    {e.isCircular && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(248,81,73,0.1)", color: "#f85149" }}
+                      >
+                        cycle
+                      </span>
+                    )}
+                    {e.isTestCoverage && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(34,197,94,0.1)", color: "#22c55e" }}
+                      >
+                        test
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -315,6 +486,22 @@ export default function DetailsPanel({
                     >
                       {e.source}
                     </span>
+                    {e.isCircular && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(248,81,73,0.1)", color: "#f85149" }}
+                      >
+                        cycle
+                      </span>
+                    )}
+                    {e.isTestCoverage && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded shrink-0"
+                        style={{ background: "rgba(34,197,94,0.1)", color: "#22c55e" }}
+                      >
+                        test
+                      </span>
+                    )}
                   </button>
                 </li>
               ))}
@@ -425,6 +612,14 @@ function InfoRow({ label, value }: { label: string; value: string }) {
 
 function getKindBadgeColor(kind: string): string {
   switch (kind) {
+    case "component": return "rgba(6,182,212,0.2)";
+    case "hook": return "rgba(244,63,94,0.2)";
+    case "reducer": return "rgba(168,85,247,0.2)";
+    case "route-handler":
+    case "middleware": return "rgba(16,185,129,0.2)";
+    case "test": return "rgba(34,197,94,0.2)";
+    case "context-provider": return "rgba(59,130,246,0.2)";
+    case "callback": return "rgba(139,148,158,0.2)";
     case "async":
       return "rgba(136,46,224,0.25)";
     case "arrow":

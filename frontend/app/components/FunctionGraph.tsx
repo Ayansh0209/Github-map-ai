@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type {
   FunctionNodeDTO,
   FunctionFilePayload,
@@ -83,11 +83,24 @@ export default function FunctionGraph({
   // Extract short file name from path
   const shortFile = selectedFunction.filePath.split("/").pop() || selectedFunction.filePath;
 
+  // ── Pagination state ──────────────────────────────────────────────────────
+  const PAGE_SIZE = 20;
+  const [callerPage, setCallerPage] = useState(0);
+  const [calleePage, setCalleePage] = useState(0);
+
+  // Reset pages when function changes
+  useMemo(() => { setCallerPage(0); setCalleePage(0); }, [selectedFunction.id]);
+
+  const callerTotalPages = Math.ceil(callers.length / PAGE_SIZE);
+  const calleeTotalPages = Math.ceil(callees.length / PAGE_SIZE);
+  const displayedCallers = callers.slice(callerPage * PAGE_SIZE, (callerPage + 1) * PAGE_SIZE);
+  const displayedCallees = callees.slice(calleePage * PAGE_SIZE, (calleePage + 1) * PAGE_SIZE);
+
   return (
-    <div className="w-full" style={{ minHeight: "75vh" }}>
+    <div className="w-full flex flex-col" style={{ height: "100%" }}>
       {/* ── Top bar: Back + Breadcrumb ────────────────────────────────────── */}
       <div
-        className="flex items-center gap-3 mb-4 px-2 py-2 flex-wrap"
+        className="flex items-center gap-3 px-2 py-2 flex-wrap shrink-0"
         style={{ borderBottom: "1px solid #21262d" }}
       >
         {/* Back buttons */}
@@ -140,43 +153,62 @@ export default function FunctionGraph({
 
       {/* ── Three-column layout ───────────────────────────────────────────── */}
       <div
-        className="grid gap-6 px-4"
+        className="grid gap-6 px-4 py-4 flex-1 overflow-hidden"
         style={{
           gridTemplateColumns: "1fr auto 1fr",
-          minHeight: "500px",
           alignItems: "start",
         }}
       >
         {/* ── LEFT: Callers ─────────────────────────────────────────────── */}
-        <div className="space-y-3">
+        <div className="flex flex-col h-full overflow-hidden">
           <div
-            className="text-xs font-semibold uppercase tracking-wider mb-3 flex items-center gap-2"
+            className="text-xs font-semibold uppercase tracking-wider mb-3 flex items-center gap-2 shrink-0"
             style={{ color: "#3fb950" }}
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M19 12H5M12 19l-7-7 7-7" />
             </svg>
             Callers ({callers.length})
           </div>
 
-          {callers.length === 0 ? (
-            <EmptyState>Not called by any tracked function</EmptyState>
-          ) : (
-            callers.map((fn) => (
-              <FunctionCard
-                key={fn.id}
-                fn={fn}
-                borderColor="#3fb950"
-                onClick={() => onFunctionNavigate(fn)}
-              />
-            ))
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+            {callers.length === 0 ? (
+              <EmptyState>Not called by any tracked function</EmptyState>
+            ) : (
+              displayedCallers.map((fn) => (
+                <FunctionCard
+                  key={fn.id}
+                  fn={fn}
+                  borderColor="#3fb950"
+                  onClick={() => onFunctionNavigate(fn)}
+                />
+              ))
+            )}
+          </div>
+
+          {/* Caller pagination */}
+          {callerTotalPages > 1 && (
+            <div className="flex items-center justify-between pt-3 mt-2 shrink-0" style={{ borderTop: "1px solid #21262d" }}>
+              <button
+                onClick={() => setCallerPage(p => Math.max(0, p - 1))}
+                disabled={callerPage === 0}
+                className="text-[11px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-30"
+                style={{ background: "#161b22", border: "1px solid #30363d", color: "#8b949e" }}
+              >
+                ← Prev
+              </button>
+              <span className="text-[10px] font-mono" style={{ color: "#484f58" }}>
+                {callerPage * PAGE_SIZE + 1}–{Math.min((callerPage + 1) * PAGE_SIZE, callers.length)} of {callers.length}
+              </span>
+              <button
+                onClick={() => setCallerPage(p => Math.min(callerTotalPages - 1, p + 1))}
+                disabled={callerPage >= callerTotalPages - 1}
+                className="text-[11px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-30"
+                style={{ background: "#161b22", border: "1px solid #30363d", color: "#8b949e" }}
+              >
+                Next →
+              </button>
+            </div>
           )}
         </div>
 
@@ -196,7 +228,8 @@ export default function FunctionGraph({
           <div
             className="rounded-xl p-5 text-center relative"
             style={{
-              width: "220px",
+              minWidth: "220px",
+              maxWidth: "100%",
               background: "#1c2128",
               border: "2px solid #f0883e",
               boxShadow: "0 0 20px rgba(240,136,62,0.15)",
@@ -226,7 +259,7 @@ export default function FunctionGraph({
 
             {/* Function name */}
             <div
-              className="text-base font-bold mb-1"
+              className="text-base font-bold mb-1 break-all"
               style={{
                 color: "#e6edf3",
                 fontFamily: "var(--font-geist-mono), monospace",
@@ -307,35 +340,55 @@ export default function FunctionGraph({
         </div>
 
         {/* ── RIGHT: Callees ────────────────────────────────────────────── */}
-        <div className="space-y-3">
+        <div className="flex flex-col h-full overflow-hidden">
           <div
-            className="text-xs font-semibold uppercase tracking-wider mb-3 flex items-center gap-2"
+            className="text-xs font-semibold uppercase tracking-wider mb-3 flex items-center gap-2 shrink-0"
             style={{ color: "#58a6ff" }}
           >
             Callees ({callees.length})
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M5 12h14M12 5l7 7-7 7" />
             </svg>
           </div>
 
-          {callees.length === 0 ? (
-            <EmptyState>Does not call any tracked functions</EmptyState>
-          ) : (
-            callees.map((fn) => (
-              <FunctionCard
-                key={fn.id}
-                fn={fn}
-                borderColor="#58a6ff"
-                onClick={() => onFunctionNavigate(fn)}
-              />
-            ))
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+            {callees.length === 0 ? (
+              <EmptyState>Does not call any tracked functions</EmptyState>
+            ) : (
+              displayedCallees.map((fn) => (
+                <FunctionCard
+                  key={fn.id}
+                  fn={fn}
+                  borderColor="#58a6ff"
+                  onClick={() => onFunctionNavigate(fn)}
+                />
+              ))
+            )}
+          </div>
+
+          {/* Callee pagination */}
+          {calleeTotalPages > 1 && (
+            <div className="flex items-center justify-between pt-3 mt-2 shrink-0" style={{ borderTop: "1px solid #21262d" }}>
+              <button
+                onClick={() => setCalleePage(p => Math.max(0, p - 1))}
+                disabled={calleePage === 0}
+                className="text-[11px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-30"
+                style={{ background: "#161b22", border: "1px solid #30363d", color: "#8b949e" }}
+              >
+                ← Prev
+              </button>
+              <span className="text-[10px] font-mono" style={{ color: "#484f58" }}>
+                {calleePage * PAGE_SIZE + 1}–{Math.min((calleePage + 1) * PAGE_SIZE, callees.length)} of {callees.length}
+              </span>
+              <button
+                onClick={() => setCalleePage(p => Math.min(calleeTotalPages - 1, p + 1))}
+                disabled={calleePage >= calleeTotalPages - 1}
+                className="text-[11px] px-2.5 py-1 rounded-lg transition-colors disabled:opacity-30"
+                style={{ background: "#161b22", border: "1px solid #30363d", color: "#8b949e" }}
+              >
+                Next →
+              </button>
+            </div>
           )}
         </div>
       </div>

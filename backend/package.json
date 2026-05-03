@@ -12,6 +12,7 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@octokit/rest": "^18.12.0",
     "@upstash/redis": "^1.37.0",
     "bullmq": "^5.73.3",

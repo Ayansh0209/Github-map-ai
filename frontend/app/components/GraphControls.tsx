@@ -8,9 +8,13 @@ interface GraphControlsProps {
   onSearchChange: (query: string) => void;
   onViewChange: (view: ViewMode) => void;
   onResetView: () => void;
+  onSearchOpen?: () => void;
   fileCount: number;
   edgeCount: number;
   hasFunctionSelected: boolean;
+  focusMode?: boolean;
+  onFocusModeToggle?: () => void;
+  hasIssueResult?: boolean;
 }
 
 export default function GraphControls({
@@ -19,9 +23,13 @@ export default function GraphControls({
   onSearchChange,
   onViewChange,
   onResetView,
+  onSearchOpen,
   fileCount,
   edgeCount,
   hasFunctionSelected,
+  focusMode = false,
+  onFocusModeToggle,
+  hasIssueResult = false,
 }: GraphControlsProps) {
   return (
     <div
@@ -35,7 +43,7 @@ export default function GraphControls({
       }}
     >
       {/* Search */}
-      <div className="relative flex-1 min-w-[200px] max-w-[320px]">
+      {/* <div className="relative flex-1 min-w-[200px] max-w-[320px]">
         <svg
           className="absolute left-3 top-1/2 -translate-y-1/2"
           width="14"
@@ -74,7 +82,7 @@ export default function GraphControls({
             ✕
           </button>
         )}
-      </div>
+      </div> */}
 
       {/* View toggle */}
       <div className="flex flex-col gap-1">
@@ -132,6 +140,39 @@ export default function GraphControls({
       >
         Reset View
       </button>
+
+      {/* Advanced Search */}
+      {onSearchOpen && (
+        <button
+          id="advanced-search-btn"
+          onClick={onSearchOpen}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80 flex items-center gap-1.5"
+          style={{
+            background: "#161b22",
+            border: "1px solid #30363d",
+            color: "#58a6ff",
+          }}
+        >
+          <span>🔍</span>
+          <span>Search</span>
+          <span className="text-[10px] px-1 rounded" style={{ background: "rgba(88,166,255,0.12)", color: "#58a6ff" }}>⌘K</span>
+        </button>
+      )}
+
+      {/* Focus Mode Toggle */}
+      {hasIssueResult && onFocusModeToggle && (
+        <button
+          onClick={onFocusModeToggle}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80 flex items-center gap-1.5"
+          style={{
+            background: focusMode ? "rgba(249,115,22,0.15)" : "#161b22",
+            border: `1px solid ${focusMode ? "rgba(249,115,22,0.3)" : "#30363d"}`,
+            color: focusMode ? "#f97316" : "#8b949e",
+          }}
+        >
+          {focusMode ? "Show all files" : "Focus on affected"}
+        </button>
+      )}
 
       {/* Stats */}
       <span className="text-xs ml-auto" style={{ color: "#484f58" }}>

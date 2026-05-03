@@ -19,7 +19,7 @@ export default function StatsBar({ stats, owner, repo }: StatsBarProps) {
         <span className="text-sm text-muted">— Analysis complete</span>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-9 gap-3">
         <StatCard label="Files" value={stats.totalFiles} icon="📄" />
         <StatCard label="Parsed" value={stats.parsedFiles} icon="✓" highlight />
         <StatCard label="Functions" value={stats.totalFunctions} icon="ƒ" />
@@ -27,6 +27,12 @@ export default function StatsBar({ stats, owner, repo }: StatsBarProps) {
         <StatCard label="Call Edges" value={stats.totalCallEdges} icon="⇆" />
         <StatCard label="Test Files" value={stats.testFiles} icon="🧪" />
         <StatCard label="Entry Points" value={stats.entryPoints} icon="⚡" />
+        {stats.deadCodeFiles > 0 && (
+          <StatCard label="Dead Code" value={stats.deadCodeFiles} icon="💀" />
+        )}
+        {stats.workspacePackages > 0 && (
+          <StatCard label="Packages" value={stats.workspacePackages} icon="📦" />
+        )}
       </div>
     </div>
   );

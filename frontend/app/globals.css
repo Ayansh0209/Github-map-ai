@@ -195,3 +195,140 @@ body {
 .animate-pulse-dot {
   animation: pulse-dot 2s ease-in-out infinite;
 }
+
+/* ── Node pulse (3 pulses when zooming to node) ───────────── */
+
+@keyframes node-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.6; }
+}
+
+.animate-node-pulse {
+  animation: node-pulse 0.4s ease-in-out 3;
+}
+
+/* ── Chat drawer slide-up ─────────────────────────────────── */
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.animate-slide-up {
+  animation: slide-up 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes slide-down {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
+}
+
+/* ── Sidebar transitions ──────────────────────────────────── */
+
+.sidebar-transition {
+  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Code viewer ──────────────────────────────────────────── */
+
+.code-viewer {
+  font-family: var(--font-geist-mono), ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+}
+
+.code-viewer .line-number {
+  display: inline-block;
+  width: 3.5em;
+  text-align: right;
+  padding-right: 1em;
+  color: #484f58;
+  user-select: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.code-viewer .line-number:hover {
+  color: #8b949e;
+}
+
+.code-viewer .line-highlight {
+  background: rgba(232, 164, 0, 0.12);
+}
+
+.code-viewer .line-highlight .line-number {
+  color: #e8a400;
+  font-weight: 600;
+}
+
+/* ── Message bubbles ──────────────────────────────────────── */
+
+.chat-bubble-user {
+  background: #1f6feb;
+  color: #fff;
+  border-radius: 16px 16px 4px 16px;
+}
+
+.chat-bubble-ai {
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #e6edf3;
+  border-radius: 16px 16px 16px 4px;
+}
+
+.chat-bubble-ai pre {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+  position: relative;
+}
+
+.chat-bubble-ai code {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 12px;
+}
+
+/* ── Drag handle ──────────────────────────────────────────── */
+
+.resize-handle {
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.15s;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.resize-handle:hover,
+.resize-handle.active {
+  background: #1f6feb;
+}
+
+.resize-handle .collapse-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 20px;
+  height: 32px;
+  border-radius: 4px;
+  background: #21262d;
+  border: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #8b949e;
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.resize-handle:hover .collapse-btn,
+.resize-handle .collapse-btn:hover {
+  opacity: 1;
+}

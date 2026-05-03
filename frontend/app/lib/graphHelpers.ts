@@ -66,6 +66,15 @@ const KIND_BADGES: Record<string, string> = {
   getter: "get",
   setter: "set",
   async: "async",
+  component: "<Comp/>",
+  hook: "hook",
+  reducer: "reduce",
+  "route-handler": "route",
+  middleware: "mw",
+  test: "test",
+  utility: "util",
+  callback: "cb",
+  "context-provider": "ctx",
   unknown: "fn",
 };
 
