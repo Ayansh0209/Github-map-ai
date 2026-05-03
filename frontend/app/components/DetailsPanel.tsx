@@ -13,6 +13,7 @@ import {
   sanitizeFileId,
 } from "../lib/graphHelpers";
 import CodeViewer from "./CodeViewer";
+import AIChatTab from "./AIChatTab";
 
 interface DetailsPanelProps {
   file: FileNodeDTO | null;
@@ -29,10 +30,15 @@ interface DetailsPanelProps {
   codeContent?: string | null;
   onViewSource?: () => void;
   isLoadingCode?: boolean;
-  codeMaxLines?: number;
-  onLoadMoreCode?: () => void;
   // Chat
   onOpenChat?: (fileId: string) => void;
+  // Tabs & Chat State
+  activeTab?: "info" | "code" | "ai";
+  onTabChange?: (tab: "info" | "code" | "ai") => void;
+  chatMessages?: { role: "user" | "assistant"; content: string; }[];
+  setChatMessages?: React.Dispatch<React.SetStateAction<{ role: "user" | "assistant"; content: string; }[]>>;
+  isChatLoading?: boolean;
+  setIsChatLoading?: (val: boolean) => void;
 }
 
 export default function DetailsPanel({
@@ -49,9 +55,13 @@ export default function DetailsPanel({
   codeContent,
   onViewSource,
   isLoadingCode,
-  codeMaxLines = 200,
-  onLoadMoreCode,
   onOpenChat,
+  activeTab = "info",
+  onTabChange,
+  chatMessages,
+  setChatMessages,
+  isChatLoading,
+  setIsChatLoading,
 }: DetailsPanelProps) {
   if (!file) return null;
 
@@ -72,17 +82,16 @@ export default function DetailsPanel({
 
   return (
     <div
-      className="h-full overflow-y-auto"
+      className="h-full flex flex-col overflow-hidden"
       style={{
         background: "#161b22",
       }}
     >
       {/* Header */}
       <div
-        className="sticky top-0 backdrop-blur p-4 flex items-start justify-between gap-3 z-10"
+        className="shrink-0 p-4 pb-2 flex items-start justify-between gap-3 z-10"
         style={{
-          background: "rgba(22,27,34,0.95)",
-          borderBottom: "1px solid #30363d",
+          background: "rgba(22,27,34,1)",
         }}
       >
         <div className="min-w-0">
@@ -121,8 +130,32 @@ export default function DetailsPanel({
         </button>
       </div>
 
-      {/* Body */}
-      <div className="p-4 space-y-5">
+      {/* Tabs */}
+      <div className="shrink-0 flex gap-4 px-4 border-b" style={{ borderColor: "#30363d", background: "rgba(22,27,34,1)" }}>
+        <button 
+          onClick={() => onTabChange?.("info")}
+          className={`pb-2 text-sm font-medium border-b-2 transition-colors ${activeTab === "info" ? "border-blue-500 text-blue-400" : "border-transparent text-[#8b949e] hover:text-[#c9d1d9]"}`}
+        >
+          Info
+        </button>
+        <button 
+          onClick={() => onTabChange?.("code")}
+          className={`pb-2 text-sm font-medium border-b-2 transition-colors ${activeTab === "code" ? "border-blue-500 text-blue-400" : "border-transparent text-[#8b949e] hover:text-[#c9d1d9]"}`}
+        >
+          Code
+        </button>
+        <button 
+          onClick={() => onTabChange?.("ai")}
+          className={`pb-2 text-sm font-medium border-b-2 transition-colors ${activeTab === "ai" ? "border-purple-500 text-purple-400" : "border-transparent text-[#8b949e] hover:text-[#c9d1d9]"}`}
+        >
+          AI Chat
+        </button>
+      </div>
+
+      {/* Body Container */}
+      <div className="flex-1 overflow-y-auto">
+        {activeTab === "info" && (
+          <div className="p-4 space-y-5">
         {/* RELATED ISSUE section — shown when file is in issue map result */}
         {fileIssueHit && issueResult && (
           <section>
@@ -222,42 +255,7 @@ export default function DetailsPanel({
           )}
         </section>
 
-        {/* View Source button */}
-        {onViewSource && (
-          <section>
-            <button
-              onClick={onViewSource}
-              disabled={isLoadingCode}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-medium transition-colors hover:opacity-90 disabled:opacity-40"
-              style={{ background: "#1c2128", border: "1px solid #30363d", color: "#e6edf3" }}
-            >
-              {isLoadingCode ? (
-                <span className="inline-block w-3 h-3 border-2 rounded-full animate-spin" style={{ borderColor: "#58a6ff", borderTopColor: "transparent" }} />
-              ) : (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M16 18l6-6-6-6M8 6l-6 6 6 6" />
-                </svg>
-              )}
-              {codeContent ? "Hide Source" : "{ } View Source"}
-            </button>
-          </section>
-        )}
 
-        {/* Code Viewer */}
-        {codeContent && (
-          <section>
-            <CodeViewer
-              code={codeContent}
-              filePath={file.path}
-              language={file.language}
-              maxLines={codeMaxLines}
-              onLoadMore={onLoadMoreCode}
-              hasMore={codeContent.split("\n").length > codeMaxLines}
-              title={file.label}
-              maxHeight="400px"
-            />
-          </section>
-        )}
 
         {/* ── TEST INTELLIGENCE ───────────────────────────────────────────── */}
         {file.kind === "test" && (
@@ -568,6 +566,57 @@ export default function DetailsPanel({
             </svg>
           </a>
         </section>
+          </div>
+        )}
+
+        {activeTab === "code" && (
+          <div className="h-full flex flex-col p-4">
+            {isLoadingCode ? (
+              <div className="flex-1 flex items-center justify-center">
+                <span className="inline-block w-6 h-6 border-2 border-t-transparent rounded-full animate-spin" style={{ borderColor: "#58a6ff", borderTopColor: "transparent" }} />
+              </div>
+            ) : codeContent ? (
+              <div className="flex-1 overflow-hidden">
+                <CodeViewer
+                  code={codeContent}
+                  filePath={file.path}
+                  language={file.language}
+                  title={file.label}
+                  maxHeight="100%"
+                />
+              </div>
+            ) : (
+              <div className="flex-1 flex flex-col items-center justify-center text-sm" style={{ color: "#8b949e" }}>
+                <p className="mb-4">No code loaded</p>
+                {onViewSource && (
+                  <button
+                    onClick={onViewSource}
+                    className="px-4 py-2 rounded-lg transition-colors"
+                    style={{ background: "#21262d", border: "1px solid #30363d", color: "#c9d1d9" }}
+                  >
+                    Load Source
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "ai" && chatMessages && setChatMessages && setIsChatLoading && (
+          <div className="h-full">
+            <AIChatTab
+              owner={owner}
+              repo={repo}
+              commitSha={commitSha}
+              issueNumber={issueResult?.issueNumber}
+              fileId={file.id}
+              messages={chatMessages}
+              setMessages={setChatMessages}
+              isLoading={!!isChatLoading}
+              setIsLoading={setIsChatLoading}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

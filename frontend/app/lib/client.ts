@@ -127,3 +127,21 @@ export async function fetchRepoIssues(
   }
   return res.json();
 }
+
+export async function fetchFileContent(
+  owner: string,
+  repo: string,
+  commitSha: string,
+  filePath: string,
+): Promise<{ content: string | null; lines: number }> {
+  const res = await fetch(`${API_BASE}/file-content`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner, repo, commitSha, filePath }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Failed to fetch file content" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}

@@ -161,6 +161,23 @@ export default function Sidebar({
         }}
       >
         <div className="flex-1 overflow-y-auto p-3 space-y-3">
+          {/* Header with collapse button */}
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "#8b949e" }}>EXPLORER</span>
+            <button
+              onClick={() => onCollapsedChange(true)}
+              className="w-6 h-6 rounded flex items-center justify-center transition-colors hover:text-white"
+              style={{ background: "transparent", color: "#8b949e" }}
+              onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = "#21262d"; }}
+              onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
+              title="Collapse sidebar"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M15 18l-6-6 6-6" />
+              </svg>
+            </button>
+          </div>
+
           {/* ── Issue Mapper Input ──────────────────────────────────────── */}
           <IssueMapper
             owner={owner}
@@ -330,17 +347,7 @@ export default function Sidebar({
       </div>
 
       {/* Resize handle */}
-      <div className="resize-handle" onMouseDown={handleMouseDown}>
-        <button
-          className="collapse-btn"
-          onClick={(e) => { e.stopPropagation(); onCollapsedChange(true); }}
-          title="Collapse sidebar"
-        >
-          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M15 18l-6-6 6-6" />
-          </svg>
-        </button>
-      </div>
+      <div className="resize-handle" onMouseDown={handleMouseDown} />
     </>
   );
 }

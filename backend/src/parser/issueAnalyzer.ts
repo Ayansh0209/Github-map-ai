@@ -272,6 +272,9 @@ export async function callGeminiForFix(
         systemInstruction:
             "You are a senior software engineer. Given a GitHub issue and source code, " +
             "provide the minimal precise code change to fix the issue. " +
+            "When suggesting fixes, always mention ALL files that need to change. " +
+            "If test files need updating, include them explicitly. " +
+            "Show the complete fix across all affected files, not just the primary file. " +
             "Return ONLY valid JSON. No markdown outside JSON.",
         generationConfig: {
             temperature: 0.1,
@@ -295,7 +298,10 @@ PRIMARY FILE TO FIX: ${primaryFile.id}
 \`\`\`
 ${primaryContent}
 \`\`\`
-${connectedContent ? `\nCONNECTED FILES:\n${connectedContent}` : ""}
+${connectedContent ? `\nCONNECTED FILES (imports/imported-by):\n${connectedContent}` : ""}
+
+OTHER AFFECTED FILES (may also need changes):
+${connectedFiles.map((f) => "--- " + f.id + " ---\n" + smartTruncate(f.content, extractTechnicalTerms(issue.title + " " + issue.body), 100)).join("\n\n")}
 
 TASK: Provide the minimal code change to fix this issue.
 Show exact lines to replace.

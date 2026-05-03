@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, Suspense } from "react";
+import { useState, useCallback, useRef, useEffect, Suspense, useMemo } from "react";
+import { fetchFileContent } from "../lib/client";
 import { useRouter, useSearchParams } from "next/navigation";
 import Navbar from "../components/Navbar";
 import Sidebar from "../components/Sidebar";
@@ -9,7 +10,7 @@ import FunctionGraph from "../components/FunctionGraph";
 import DetailsPanel from "../components/DetailsPanel";
 import GraphControls from "../components/GraphControls";
 import SearchPanel from "../components/SearchPanel";
-import ChatDrawer from "../components/ChatDrawer";
+import FilterBar from "../components/FilterBar";
 import type {
   FileNodeDTO,
   FunctionNodeDTO,
@@ -59,6 +60,38 @@ function RepoPageContent() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchPanelOpen, setSearchPanelOpen] = useState(false);
 
+  // ── Sidebar Tab State ───────────────────────────────────────────────────────
+  const [sidebarTab, setSidebarTab] = useState<"info" | "code" | "ai">("info");
+
+  // ── Filter state ────────────────────────────────────────────────────────────
+  const [activeKinds, setActiveKinds] = useState<Set<string>>(new Set());
+  const [activeLanguages, setActiveLanguages] = useState<Set<string>>(new Set());
+
+  const filteredNodeIds = useMemo(() => {
+    if (!fileGraph) return undefined;
+    if (activeKinds.size === 0 && activeLanguages.size === 0) return undefined;
+
+    const filtered = new Set<string>();
+    for (const f of fileGraph.files) {
+      let kindMatch = activeKinds.size === 0;
+      if (activeKinds.size > 0) {
+        if (activeKinds.has("entry") && f.isEntryPoint) kindMatch = true;
+        else if (activeKinds.has("source") && f.kind === "source") kindMatch = true;
+        else if (activeKinds.has("test") && f.kind === "test") kindMatch = true;
+        else if (activeKinds.has("config") && f.kind === "config") kindMatch = true;
+        else if (activeKinds.has("ui") && (f.language === "tsx" || f.language === "jsx")) kindMatch = true;
+      }
+
+      let langMatch = activeLanguages.size === 0;
+      if (activeLanguages.size > 0) {
+        if (activeLanguages.has(f.language)) langMatch = true;
+      }
+
+      if (kindMatch && langMatch) filtered.add(f.id);
+    }
+    return filtered;
+  }, [fileGraph, activeKinds, activeLanguages]);
+
   // ── Issue mapping state ─────────────────────────────────────────────────────
   const [issueResult, setIssueResult] = useState<IssueMapResult | null>(null);
   const [isIssueLoading, setIsIssueLoading] = useState(false);
@@ -75,6 +108,51 @@ function RepoPageContent() {
   });
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
+  const [rightSidebarWidth, setRightSidebarWidth] = useState(() => {
+    if (typeof window === "undefined") return 380;
+    try { return parseInt(localStorage.getItem("codemap-right-sidebar-width") || "380", 10); } catch { return 380; }
+  });
+
+  const rightIsDragging = useRef(false);
+  const rightStartX = useRef(0);
+  const rightStartW = useRef(380);
+  const [isRightDragging, setIsRightDragging] = useState(false);
+
+  const handleRightResizeMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    rightIsDragging.current = true;
+    setIsRightDragging(true);
+    rightStartX.current = e.clientX;
+    rightStartW.current = rightSidebarWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const handleMouseMove = (ev: MouseEvent) => {
+      if (!rightIsDragging.current) return;
+      const diff = rightStartX.current - ev.clientX; // dragging left increases width
+      const maxWidth = typeof window !== "undefined" ? window.innerWidth / 2 : 800;
+      const newW = Math.max(300, Math.min(maxWidth, rightStartW.current + diff));
+      setRightSidebarWidth(newW);
+    };
+
+    const handleMouseUp = () => {
+      rightIsDragging.current = false;
+      setIsRightDragging(false);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.removeEventListener("mousemove", handleMouseMove);
+      document.removeEventListener("mouseup", handleMouseUp);
+      try { localStorage.setItem("codemap-right-sidebar-width", String(rightSidebarWidth)); } catch {}
+    };
+
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  };
+
+  useEffect(() => {
+    try { localStorage.setItem("codemap-right-sidebar-width", String(rightSidebarWidth)); } catch {}
+  }, [rightSidebarWidth]);
+
   // ── Focus mode ──────────────────────────────────────────────────────────────
   const [focusMode, setFocusMode] = useState(false);
 
@@ -88,12 +166,12 @@ function RepoPageContent() {
   const [codeViewerFileId, setCodeViewerFileId] = useState<string | null>(null);
   const [codeContent, setCodeContent] = useState<string | null>(null);
   const [isLoadingCode, setIsLoadingCode] = useState(false);
-  const [codeMaxLines, setCodeMaxLines] = useState(200);
   const fileContentCache = useRef<Map<string, string>>(new Map());
 
-  // ── Chat state ──────────────────────────────────────────────────────────────
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatFileId, setChatFileId] = useState<string | null>(null);
+  // ── Chat state (preserved) ──────────────────────────────────────────────────
+  interface ChatMessage { role: "user" | "assistant"; content: string; }
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [isChatLoading, setIsChatLoading] = useState(false);
 
   // ── Refs ─────────────────────────────────────────────────────────────────────
   const resetZoomRef = useRef<(() => void) | null>(null);
@@ -212,11 +290,15 @@ function RepoPageContent() {
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
-  const handleFileClick = useCallback((file: FileNodeDTO) => {
+  const handleFileClick = useCallback((file: FileNodeDTO | null) => {
+    if (!file) {
+      setSelectedFile(null);
+      setSidebarTab("info");
+      return;
+    }
     setSelectedFile(file);
     setCodeViewerFileId(null);
     setCodeContent(null);
-    setCodeMaxLines(200);
     // Push history: navigated to a file
     pushHistory({ view: "file-graph", fileId: file.id, fnId: null, fnName: null });
   }, [pushHistory]);
@@ -228,7 +310,6 @@ function RepoPageContent() {
       setSelectedFile(file);
       setCodeViewerFileId(null);
       setCodeContent(null);
-      setCodeMaxLines(200);
       pushHistory({ view: "file-graph", fileId: file.id, fnId: null, fnName: null });
     }
   }, [fileGraph, pushHistory]);
@@ -317,9 +398,8 @@ function RepoPageContent() {
   const handleViewSource = useCallback(async () => {
     if (!selectedFile) return;
 
-    if (codeViewerFileId === selectedFile.id) {
-      setCodeViewerFileId(null);
-      setCodeContent(null);
+    if (codeViewerFileId === selectedFile.id && codeContent) {
+      // already loaded
       return;
     }
 
@@ -327,35 +407,36 @@ function RepoPageContent() {
     if (cached) {
       setCodeViewerFileId(selectedFile.id);
       setCodeContent(cached);
-      setCodeMaxLines(selectedFile.lineCount > 500 ? 200 : selectedFile.lineCount);
       return;
     }
 
     setIsLoadingCode(true);
     try {
-      const url = `https://raw.githubusercontent.com/${owner}/${repo}/${commitSha}/${selectedFile.path}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
+      const data = await fetchFileContent(owner, repo, commitSha, selectedFile.path);
+      const text = data.content || "";
       fileContentCache.current.set(selectedFile.id, text);
       setCodeViewerFileId(selectedFile.id);
       setCodeContent(text);
-      setCodeMaxLines(selectedFile.lineCount > 500 ? 200 : selectedFile.lineCount);
     } catch (err) {
       console.error("Failed to fetch source:", err);
     } finally {
       setIsLoadingCode(false);
     }
-  }, [selectedFile, codeViewerFileId, owner, repo, commitSha]);
+  }, [selectedFile, codeViewerFileId, codeContent, owner, repo, commitSha]);
 
-  const handleLoadMoreCode = useCallback(() => {
-    setCodeMaxLines(prev => prev + 150);
-  }, []);
+  // Auto-fetch code when switching to code tab
+  useEffect(() => {
+    if (sidebarTab === "code" && selectedFile && (!codeContent || codeViewerFileId !== selectedFile.id)) {
+      handleViewSource();
+    }
+  }, [sidebarTab, selectedFile, codeContent, codeViewerFileId, handleViewSource]);
+
+
 
   // ── Open Chat ───────────────────────────────────────────────────────────────
   const handleOpenChat = useCallback((fileId: string) => {
-    setChatFileId(fileId);
-    setChatOpen(true);
+    // Switch to AI tab in the details panel
+    setSidebarTab("ai");
   }, []);
 
   // ── SearchPanel callbacks ─────────────────────────────────────────────────
@@ -392,7 +473,7 @@ function RepoPageContent() {
     );
   }
 
-  const chatFileName = chatFileId?.split("/").pop() || chatFileId || "";
+
 
   return (
     <div className="flex flex-col h-screen overflow-hidden" style={{ background: "#0d1117" }}>
@@ -443,6 +524,13 @@ function RepoPageContent() {
               hasIssueResult={!!issueResult}
             />
           </div>
+          
+          <FilterBar
+            activeKinds={activeKinds}
+            activeLanguages={activeLanguages}
+            onKindsChange={setActiveKinds}
+            onLanguagesChange={setActiveLanguages}
+          />
 
           {/* Graph */}
           <div className="flex-1 overflow-hidden">
@@ -459,6 +547,7 @@ function RepoPageContent() {
                 highlightedIssueFiles={highlightedIssueFiles}
                 focusMode={focusMode}
                 zoomToNodeRef={zoomToNodeRef}
+                filteredNodeIds={filteredNodeIds}
               />
             ) : selectedFunction && functionFiles ? (
               <FunctionGraph
@@ -493,14 +582,37 @@ function RepoPageContent() {
         </div>
 
         {/* ── Right Panel ────────────────────────────────────────────── */}
-        {selectedFile && (
-          <div
-            className="shrink-0 overflow-hidden"
-            style={{
-              width: "380px",
-              borderLeft: "1px solid #21262d",
-            }}
-          >
+        <div 
+          className="shrink-0 flex overflow-hidden"
+          style={{ 
+            width: selectedFile ? `${rightSidebarWidth + 12}px` : "0px",
+            transition: isRightDragging ? "none" : "width 0.25s cubic-bezier(0.4, 0, 0.2, 1)"
+          }}
+        >
+          {selectedFile && (
+            <>
+              <div 
+                onMouseDown={handleRightResizeMouseDown}
+              style={{
+                cursor: "col-resize",
+                width: "12px",
+                flexShrink: 0,
+                display: "flex",
+                justifyContent: "center",
+                background: "transparent",
+                zIndex: 10
+              }}
+              className="hover:bg-blue-500/20 transition-colors group"
+              title="Resize sidebar"
+            >
+              <div className="h-full group-hover:bg-blue-500 transition-colors" style={{ width: "1px", background: "#21262d" }} />
+            </div>
+            <div
+              className="shrink-0 overflow-hidden"
+              style={{
+                width: `${rightSidebarWidth}px`,
+              }}
+            >
             <DetailsPanel
               file={selectedFile}
               edges={fileGraph.importEdges}
@@ -515,12 +627,18 @@ function RepoPageContent() {
               codeContent={codeViewerFileId === selectedFile.id ? codeContent : null}
               onViewSource={handleViewSource}
               isLoadingCode={isLoadingCode}
-              codeMaxLines={codeMaxLines}
-              onLoadMoreCode={handleLoadMoreCode}
-              onOpenChat={issueResult ? handleOpenChat : undefined}
+              onOpenChat={handleOpenChat}
+              activeTab={sidebarTab}
+              onTabChange={setSidebarTab}
+              chatMessages={chatMessages}
+              setChatMessages={setChatMessages}
+              isChatLoading={isChatLoading}
+              setIsChatLoading={setIsChatLoading}
             />
-          </div>
+            </div>
+          </>
         )}
+        </div>
       </div>
 
       {/* ── Search Panel ─────────────────────────────────────────────── */}
@@ -533,20 +651,7 @@ function RepoPageContent() {
         onSelectFunction={handleFunctionNavigateById}
       />
 
-      {/* ── Chat Drawer ──────────────────────────────────────────────── */}
-      {chatOpen && chatFileId && issueResult && (
-        <ChatDrawer
-          isOpen={chatOpen}
-          onClose={() => setChatOpen(false)}
-          owner={owner}
-          repo={repo}
-          commitSha={commitSha}
-          issueNumber={issueResult.issueNumber}
-          fileId={chatFileId}
-          fileName={chatFileName}
-          connectedFileIds={getConnectedFileIds(chatFileId)}
-        />
-      )}
+
     </div>
   );
 }

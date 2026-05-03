@@ -9,7 +9,7 @@ import { getLanguageColor, getFolderGroup } from "../lib/graphHelpers";
 interface FileGraphProps {
   files: FileNodeDTO[];
   edges: ImportEdgeDTO[];
-  onFileClick: (file: FileNodeDTO) => void;
+  onFileClick: (file: FileNodeDTO | null) => void;
   owner: string;
   repo: string;
   searchQuery: string;
@@ -18,6 +18,7 @@ interface FileGraphProps {
   highlightedIssueFiles?: Map<string, number>; // fileId -> confidence (0-100)
   focusMode?: boolean;
   zoomToNodeRef?: React.MutableRefObject<((fileId: string) => void) | null>;
+  filteredNodeIds?: Set<string>;
 }
 
 interface SimNode extends d3.SimulationNodeDatum {
@@ -58,7 +59,7 @@ function trunc(s: string, max: number) {
 
 export default function FileGraph({
   files, edges, onFileClick, searchQuery, selectedFileId, resetZoomRef, highlightedIssueFiles = new Map(),
-  focusMode = false, zoomToNodeRef,
+  focusMode = false, zoomToNodeRef, filteredNodeIds,
 }: FileGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<d3.Selection<SVGSVGElement, unknown, null, undefined> | null>(null);
@@ -108,19 +109,41 @@ export default function FileGraph({
     }
   }, [highlightedIssueFiles]);
 
-  // ── Focus mode — dim non-affected files ────────────────────────────────────────
+  // ── Focus mode & Filter bar (Correction 3) ──────────────────────────────────
   useEffect(() => {
     if (!nodeGRef.current || !linkRef.current) return;
-    if (focusMode && highlightedIssueFiles.size > 0) {
-      nodeGRef.current.attr("opacity", (d: SimNode) =>
-        highlightedIssueFiles.has(d.id) ? 1 : 0.15
-      );
-      linkRef.current.attr("stroke-opacity", 0.05);
-    } else {
-      nodeGRef.current.attr("opacity", 1);
-      linkRef.current.attr("stroke-opacity", (d: SimLink) => d.data.isCircular ? 1 : 0.7);
-    }
-  }, [focusMode, highlightedIssueFiles]);
+    
+    nodeGRef.current.attr("opacity", (d: SimNode) => {
+      let focusOpacity = 1.0;
+      if (focusMode && highlightedIssueFiles.size > 0 && !highlightedIssueFiles.has(d.id)) {
+        focusOpacity = 0.15;
+      }
+      let filterOpacity = 1.0;
+      if (filteredNodeIds && !filteredNodeIds.has(d.id)) {
+        filterOpacity = 0.05;
+      }
+      return Math.min(focusOpacity, filterOpacity);
+    });
+
+    linkRef.current.attr("stroke-opacity", (d: SimLink) => {
+      const s = (d.source as SimNode).id;
+      const t = (d.target as SimNode).id;
+      
+      let sFiltered = filteredNodeIds && !filteredNodeIds.has(s);
+      let tFiltered = filteredNodeIds && !filteredNodeIds.has(t);
+      if (sFiltered || tFiltered) return 0; // hide edges entirely if endpoint is filtered
+
+      if (focusMode && highlightedIssueFiles.size > 0) {
+        return 0.05;
+      }
+      return d.data.isCircular ? 1 : 0.7;
+    });
+
+    // Make filtered nodes non-interactive
+    nodeGRef.current.style("pointer-events", (d: SimNode) => 
+      (filteredNodeIds && !filteredNodeIds.has(d.id)) ? "none" : "auto"
+    );
+  }, [focusMode, highlightedIssueFiles, filteredNodeIds]);
 
   // ── Zoom to node (exposed via ref) ────────────────────────────────────────────
   useEffect(() => {
@@ -140,22 +163,6 @@ export default function FileGraph({
     };
   }, [zoomToNodeRef]);
 
-  // ── ResizeObserver — update center force when container resizes ────────────────
-  useEffect(() => {
-    if (!containerRef.current || !simulationRef.current) return;
-    const observer = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        const { width: w, height: h } = entry.contentRect;
-        if (w > 0 && h > 0 && simulationRef.current) {
-          simulationRef.current.force("center", d3.forceCenter(w / 2, h / 2).strength(0.05));
-          simulationRef.current.alpha(0.1).restart();
-        }
-      }
-    });
-    observer.observe(containerRef.current);
-    return () => observer.disconnect();
-  }, [files]); // re-attach when graph rebuilds
-
   // ── Selection ring — runs when selectedFileId changes, NO camera move ────────
   useEffect(() => {
     if (!nodeGRef.current) return;
@@ -169,8 +176,8 @@ export default function FileGraph({
         .attr("r", (d: SimNode) => getRadius(d) + 7)
         .attr("stroke-opacity", 1);
     }
-    nodeGRef.current.selectAll<SVGTextElement, SimNode>("text").attr("opacity", (d: SimNode) =>
-      d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileId ? 1 : 0
+    nodeGRef.current.selectAll<SVGTextElement, SimNode>("g.node-label").attr("opacity", (d: SimNode) =>
+      d.data.isEntryPoint || d.degree >= 5 || d.id === selectedFileId ? 1 : 0
     );
   }, [selectedFileId]);
 
@@ -195,12 +202,13 @@ export default function FileGraph({
       }
       const sorted = [...degreeMap.values()].sort((a, b) => a - b);
       const hubThreshold = sorted[Math.floor(sorted.length * 0.9)] ?? Infinity;
+      const top15Threshold = sorted[Math.floor(sorted.length * 0.85)] ?? Infinity;
 
       // 2. Build nodes
       const nodeMap = new Map<string, SimNode>();
       const nodes: SimNode[] = files.map(f => {
         const deg = degreeMap.get(f.id) || 0;
-        const n: SimNode = { id: f.id, data: f, folder: getFolderGroup(f.id), degree: deg, isHub: deg >= hubThreshold && deg > 0 };
+        const n: SimNode = { id: f.id, data: f, folder: getFolderGroup(f.id), degree: deg, isHub: deg >= top15Threshold && deg > 0 };
         nodeMap.set(f.id, n);
         return n;
       });
@@ -237,7 +245,12 @@ export default function FileGraph({
       const svg = d3.select(container).append("svg")
         .attr("width", "100%").attr("height", "100%")
         .attr("viewBox", `0 0 ${width} ${height}`)
-        .attr("preserveAspectRatio", "xMidYMid meet");
+        .attr("preserveAspectRatio", "xMidYMid meet")
+        .on("click", (ev) => {
+          if (ev.target.tagName === "svg" || ev.target.tagName === "rect") {
+            onFileClickRef.current(null);
+          }
+        });
       svgRef.current = svg;
 
       const defs = svg.append("defs");
@@ -339,22 +352,38 @@ export default function FileGraph({
         }
 
         // Label
-        const important = d.data.isEntryPoint || d.isHub || d.degree >= 5;
-        g2.append("text").attr("dy", r + 14).attr("text-anchor", "middle")
-          .attr("fill", "#e6edf3")
-          .attr("font-size", d.data.isEntryPoint ? "11px" : d.isHub ? "10px" : "9px")
-          .attr("font-weight", d.data.isEntryPoint ? "600" : "normal")
-          .attr("font-family", "ui-monospace, monospace")
+        const important = d.data.isEntryPoint || d.degree >= 5 || d.isHub;
+        const textLabel = trunc(d.data.label, 18);
+        const labelGroup = g2.append("g")
+          .attr("class", "node-label")
+          .attr("transform", `translate(0, ${r + 12})`)
           .attr("pointer-events", "none")
-          .attr("opacity", important ? 1 : 0)
-          .text(trunc(d.data.label, 22));
+          .attr("opacity", important ? 1 : 0);
+          
+        labelGroup.append("rect")
+          .attr("x", -((textLabel.length * 6) / 2) - 4)
+          .attr("y", -10)
+          .attr("width", (textLabel.length * 6) + 8)
+          .attr("height", 14)
+          .attr("rx", 4)
+          .attr("fill", "rgba(13,17,23,0.85)")
+          .attr("pointer-events", "none");
+          
+        labelGroup.append("text")
+          .attr("text-anchor", "middle")
+          .attr("fill", "#e6edf3")
+          .attr("font-size", "10px")
+          .attr("font-family", "var(--font-geist-mono), monospace")
+          .attr("pointer-events", "none")
+          .text(textLabel);
       });
 
       // 7. Interactions
       nodeG
         .on("mouseover", function (ev, d) {
+          if (selectedFileIdRef.current) return; // don't hover-highlight if something is locked
           d3.select(this).select(".hover-ring").attr("r", getRadius(d) + 4).attr("stroke-opacity", 0.8);
-          d3.select(this).select("text").attr("opacity", 1);
+          d3.select(this).select("g.node-label").attr("opacity", 1);
           const conn = new Set([d.id]);
           links.forEach(l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; if (s === d.id) conn.add(t); if (t === d.id) conn.add(s); });
           nodeG.attr("opacity", n => conn.has(n.id) ? 1 : 0.06);
@@ -366,11 +395,25 @@ export default function FileGraph({
             .style("left", (ev.offsetX + 16) + "px").style("top", (ev.offsetY - 10) + "px");
         })
         .on("mouseout", function (_ev, d) {
+          if (selectedFileIdRef.current) return;
           d3.select(this).select(".hover-ring").attr("r", 0).attr("stroke-opacity", 0);
-          const always = d.data.isEntryPoint || d.isHub || d.degree >= 5 || d.id === selectedFileIdRef.current;
-          d3.select(this).select("text").attr("opacity", always ? 1 : 0);
-          nodeG.attr("opacity", 1);
-          link.attr("stroke", l => l.data.isCircular ? "#f85149" : l.data.isTypeOnly ? "#1c2128" : "#252c36").attr("stroke-opacity", l => l.data.isCircular ? 1 : 0.7).attr("marker-end", "url(#arrow-default)");
+          const label = d3.select(this).select("g.node-label");
+          const always = d.data.isEntryPoint || d.degree >= 5 || d.isHub || d.id === selectedFileIdRef.current;
+          if (!always) {
+            setTimeout(() => { label.attr("opacity", 0); }, 2500); // fade out slowly or delayed hide
+          }
+          
+          nodeG.attr("opacity", (n: SimNode) => {
+            if (filteredNodeIds && !filteredNodeIds.has(n.id)) return 0.05;
+            if (focusMode && highlightedIssueFiles.size > 0 && !highlightedIssueFiles.has(n.id)) return 0.15;
+            return 1;
+          });
+          link.attr("stroke", l => l.data.isCircular ? "#f85149" : l.data.isTypeOnly ? "#1c2128" : "#252c36").attr("stroke-opacity", (l: SimLink) => {
+            const s = (l.source as SimNode).id, t = (l.target as SimNode).id;
+            if (filteredNodeIds && (!filteredNodeIds.has(s) || !filteredNodeIds.has(t))) return 0;
+            if (focusMode && highlightedIssueFiles.size > 0) return 0.05;
+            return l.data.isCircular ? 1 : 0.7;
+          }).attr("marker-end", "url(#arrow-default)");
           tooltip.style("opacity", "0");
         })
         .on("click", (_ev, d) => { onFileClickRef.current(d.data); })
@@ -426,18 +469,22 @@ export default function FileGraph({
           .sort((a, b) => b[1].length - a[1].length)
           .slice(0, 8);
 
+        folderBg.selectAll("*").remove();
+
         for (const [folder, fNodes] of topFolders) {
           let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
           for (const n of fNodes) { const r = getRadius(n); x0 = Math.min(x0, (n.x ?? 0) - r); y0 = Math.min(y0, (n.y ?? 0) - r); x1 = Math.max(x1, (n.x ?? 0) + r); y1 = Math.max(y1, (n.y ?? 0) + r); }
           if (!isFinite(x0)) continue;
-          const pad = 16, color = getDominantLanguageColor(fNodes);
+          const pad = 16;
           folderBg.append("rect").attr("x", x0 - pad).attr("y", y0 - pad)
             .attr("width", x1 - x0 + pad * 2).attr("height", y1 - y0 + pad * 2)
-            .attr("rx", 10).attr("fill", color).attr("fill-opacity", 0.04).attr("pointer-events", "none");
+            .attr("rx", 10).attr("fill", "#ffffff").attr("fill-opacity", 0.03)
+            .attr("stroke", "rgba(255,255,255,0.06)").attr("stroke-width", 1)
+            .attr("pointer-events", "none");
           folderBg.append("text").attr("x", x0 - pad + 6).attr("y", y0 - pad + 14)
             .text(trunc(folder === "/" ? "(root)" : folder, 30))
-            .attr("fill", color).attr("font-size", "10px").attr("font-weight", "600")
-            .attr("font-family", "system-ui, sans-serif").attr("opacity", 0.5).attr("pointer-events", "none");
+            .attr("fill", "rgba(255,255,255,0.25)").attr("font-size", "9px")
+            .attr("font-family", "system-ui, sans-serif").attr("pointer-events", "none");
         }
 
         // Auto-fit only once
@@ -474,7 +521,7 @@ export default function FileGraph({
     }
     nodeGRef.current.attr("opacity", (d: SimNode) =>
       d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0.04);
-    nodeGRef.current.select<SVGTextElement>("text").attr("opacity", (d: SimNode) =>
+    nodeGRef.current.select<SVGTextElement>("g.node-label").attr("opacity", (d: SimNode) =>
       d.data.path.toLowerCase().includes(q) ? 1 : 0);
     linkRef.current.attr("stroke-opacity", 0.02);
   }, [searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
