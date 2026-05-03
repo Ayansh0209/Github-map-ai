@@ -232,7 +232,6 @@ export default function DetailsPanel({
               style={{ background: "rgba(248,81,73,0.08)", border: "1px dashed rgba(248,81,73,0.3)" }}>
               <span style={{ opacity: 0.7 }}>💀</span>
               <span style={{ color: "#f85149", fontWeight: 600 }}>Potential dead code</span>
-              <span style={{ color: "#8b949e", marginLeft: "auto" }}>score: {file.deadCodeScore ?? 0}</span>
             </div>
           )}
           {/* Unused exports — subtle list */}

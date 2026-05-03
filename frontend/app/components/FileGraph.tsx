@@ -35,7 +35,7 @@ interface SimLink extends d3.SimulationLinkDatum<SimNode> {
 
 function getRadius(n: SimNode): number {
   if (n.data.kind === "config") return 12;
-  if (n.data.kind === "test") return 16;
+  if (n.data.kind === "test") return 13;
   if (n.data.isEntryPoint) return 24;
   if (n.data.isDeadCode) return 14;
   return 18;
@@ -73,6 +73,7 @@ export default function FileGraph({
   const onFileClickRef = useRef(onFileClick);
   const selectedFileIdRef = useRef(selectedFileId);
   const [error, setError] = useState<string | null>(null);
+  const [isLegendOpen, setIsLegendOpen] = useState(true);
 
   useEffect(() => { onFileClickRef.current = onFileClick; }, [onFileClick]);
   useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
@@ -278,7 +279,7 @@ export default function FileGraph({
         dagre.layout(gDagre);
         const isolated = nodes.filter(n => n.degree === 0);
         const cols = Math.ceil(Math.sqrt(isolated.length || 1));
-        const spacingX = 140;
+        const spacingX = 170;
         const spacingY = 120;
         const startX = width * 0.72;
         const startY = height * 0.15;
@@ -384,7 +385,7 @@ export default function FileGraph({
           .attr("stroke-opacity", 0).attr("fill-opacity", 0).attr("pointer-events", "none");
         // Selection ring (orange, hidden by default)
         g2.append("circle").attr("class", "sel-ring").attr("r", 0)
-          .attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 2.5)
+          .attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 3.5)
           .attr("stroke-opacity", 0).attr("pointer-events", "none");
         // Hover ring (blue, hidden by default)
         g2.append("circle").attr("class", "hover-ring").attr("r", 0)
@@ -411,8 +412,8 @@ export default function FileGraph({
           if (d.data.isDeadCode) {
             circle.attr("fill-opacity", 0.25);
             g2.append("circle").attr("r", r + 3).attr("fill", "none")
-              .attr("stroke", "#f85149").attr("stroke-width", 1).attr("stroke-opacity", 0.3)
-              .attr("stroke-dasharray", "2,3").attr("pointer-events", "none");
+              .attr("stroke", "#f85149").attr("stroke-width", 1).attr("stroke-opacity", 0.7)
+              .attr("stroke-dasharray", "4 2").attr("pointer-events", "none");
           }
         }
 
@@ -424,8 +425,8 @@ export default function FileGraph({
 
         const labelGroup = g2.append("g")
           .attr("class", "node-label always-visible")
-          .attr("transform", `translate(0, ${r + 16})`)
-          .attr("pointer-events", "none")
+          .attr("transform", `translate(0, ${r + 18})`)
+          .style("pointer-events", "none")
           .attr("opacity", 1);
 
         labelGroup.append("text")
@@ -437,8 +438,9 @@ export default function FileGraph({
           .attr("font-size", fontSize)
           .attr("font-family", "monospace")
           .attr("font-weight", 500)
-          .attr("pointer-events", "none")
-          .text(textLabel);
+          .text(d.data.label.length > 22 ? d.data.label.slice(0, 19) + "..." : d.data.label)
+          .append("title")
+          .text(d.data.path);
       });
 
       // 7. Interactions
@@ -446,7 +448,7 @@ export default function FileGraph({
         .on("mouseover", function (ev, d) {
           if (selectedFileIdRef.current) return; // don't hover-highlight if something is locked
           d3.select(this).select(".hover-ring").attr("r", getRadius(d) + 4).attr("stroke-opacity", 0.8);
-          d3.select(this).select("g.node-label").attr("opacity", 1).style("visibility", "visible");
+          
           const conn = new Set([d.id]);
           links.forEach(l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; if (s === d.id) conn.add(t); if (t === d.id) conn.add(s); });
           nodeG.attr("opacity", n => conn.has(n.id) ? 1 : 0.06);
@@ -460,9 +462,6 @@ export default function FileGraph({
         .on("mouseout", function (_ev, d) {
           if (selectedFileIdRef.current) return;
           d3.select(this).select(".hover-ring").attr("r", 0).attr("stroke-opacity", 0);
-          const label = d3.select(this).select("g.node-label");
-          // Re-hide if it was hidden by overlap detection
-          if (label.classed("label-hidden")) label.style("visibility", "hidden");
 
           nodeG.attr("opacity", (n: SimNode) => {
             if (filteredNodeIds && !filteredNodeIds.has(n.id)) return 0.05;
@@ -530,7 +529,7 @@ export default function FileGraph({
           const pad = 70;
           folderBg.append("rect").attr("x", x0 - pad).attr("y", y0 - pad)
             .attr("width", x1 - x0 + pad * 2).attr("height", y1 - y0 + pad * 2)
-            .attr("rx", 10).attr("fill", "#ffffff").attr("fill-opacity", 0.03)
+            .attr("rx", 10).attr("fill", "#ffffff").attr("fill-opacity", 0.07)
             .attr("stroke", "rgba(255,255,255,0.06)").attr("stroke-width", 1)
             .attr("pointer-events", "none");
           folderBg.append("text").attr("x", x0 - pad + 6).attr("y", y0 - pad + 14)
@@ -579,34 +578,48 @@ export default function FileGraph({
     }
     nodeGRef.current.attr("opacity", (d: SimNode) =>
       d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0.04);
-    nodeGRef.current.select<SVGTextElement>("g.node-label").attr("opacity", (d: SimNode) =>
-      d.data.path.toLowerCase().includes(q) ? 1 : 0);
+    nodeGRef.current.selectAll("g.node-label").attr("opacity", (d: SimNode) =>
+      d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0);
     linkRef.current.attr("stroke-opacity", 0.02);
   }, [searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="w-full relative flex-1" style={{ height: "100%" }}>
-      <div className="absolute bottom-4 left-4 z-10 border rounded-xl p-3 text-xs space-y-1.5"
-        style={{ background: "rgba(13,17,23,0.92)", borderColor: "#30363d", pointerEvents: "none" }}>
-        <div className="font-semibold mb-2" style={{ color: "#8b949e" }}>Legend</div>
-        {[{ color: "#3178c6", label: "TypeScript" }, { color: "#e8a400", label: "JavaScript" },
-        { color: "#7c3aed", label: "TSX" }, { color: "#ea580c", label: "JSX" }].map(({ color, label }) => (
-          <div key={label} className="flex items-center gap-2">
-            <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color }} />
-            <span style={{ color: "#e6edf3" }}>{label}</span>
+      <div className="absolute bottom-4 left-4 z-10 border rounded-xl overflow-hidden flex flex-col pointer-events-auto"
+        style={{ background: "rgba(13,17,23,0.92)", borderColor: "#30363d" }}>
+        
+        <button 
+          onClick={() => setIsLegendOpen(!isLegendOpen)}
+          className="w-full flex items-center justify-between p-3 hover:bg-[rgba(255,255,255,0.05)] transition-colors gap-6"
+        >
+          <div className="font-semibold text-xs" style={{ color: "#e6edf3" }}>Legend</div>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#8b949e" strokeWidth="2" style={{ transform: isLegendOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </button>
+
+        {isLegendOpen && (
+          <div className="px-3 pb-3 text-xs space-y-1.5 border-t" style={{ borderColor: "#30363d" }}>
+            {[{ color: "#3178c6", label: "TypeScript" }, { color: "#e8a400", label: "JavaScript" },
+            { color: "#7c3aed", label: "TSX" }, { color: "#ea580c", label: "JSX" }].map(({ color, label }) => (
+              <div key={label} className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ background: color }} />
+                <span style={{ color: "#e6edf3" }}>{label}</span>
+              </div>
+            ))}
+            <div className="flex items-center gap-2 mt-1"><span className="w-3 h-3 rounded-full" style={{ background: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Entry Point</span></div>
+            <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Test file</span></div>
+            <div className="flex items-center gap-2"><span className="w-3 h-0.5" style={{ background: "#f85149", borderTop: "2px dashed #f85149" }} /><span style={{ color: "#e6edf3" }}>Circular Dep</span></div>
+            <div className="flex items-center gap-2"><svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg><span style={{ color: "#e6edf3" }}>Config</span></div>
+            <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#f85149", opacity: 0.5 }} /><span style={{ color: "#e6edf3" }}>Dead Code</span></div>
+            <div className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid #30363d", marginTop: "4px" }}>
+              <span className="w-3 h-0.5 rounded" style={{ background: "#f0883e" }} /><span style={{ color: "#e6edf3" }}>Selected</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-0.5 rounded" style={{ background: "#58a6ff" }} /><span style={{ color: "#e6edf3" }}>Hovered</span>
+            </div>
           </div>
-        ))}
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full" style={{ background: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Entry Point</span></div>
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Test file</span></div>
-        <div className="flex items-center gap-2"><span className="w-3 h-0.5" style={{ background: "#f85149", borderTop: "2px dashed #f85149" }} /><span style={{ color: "#e6edf3" }}>Circular Dep</span></div>
-        <div className="flex items-center gap-2"><svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg><span style={{ color: "#e6edf3" }}>Config</span></div>
-        <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#f85149", opacity: 0.5 }} /><span style={{ color: "#e6edf3" }}>Dead Code</span></div>
-        <div className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid #30363d", marginTop: "4px" }}>
-          <span className="w-3 h-0.5 rounded" style={{ background: "#f0883e" }} /><span style={{ color: "#e6edf3" }}>Selected</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className="w-3 h-0.5 rounded" style={{ background: "#58a6ff" }} /><span style={{ color: "#e6edf3" }}>Hovered</span>
-        </div>
+        )}
       </div>
       {error && (
         <div className="absolute inset-0 flex items-center justify-center z-20">

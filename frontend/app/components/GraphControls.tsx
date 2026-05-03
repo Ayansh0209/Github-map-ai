@@ -1,6 +1,7 @@
 "use client";
 
 import type { ViewMode } from "../lib/types";
+import FiltersDropdown from "./FiltersDropdown";
 
 interface GraphControlsProps {
   view: ViewMode;
@@ -15,6 +16,10 @@ interface GraphControlsProps {
   focusMode?: boolean;
   onFocusModeToggle?: () => void;
   hasIssueResult?: boolean;
+  activeKinds: Set<string>;
+  activeLanguages: Set<string>;
+  onKindsChange: (kinds: Set<string>) => void;
+  onLanguagesChange: (langs: Set<string>) => void;
 }
 
 export default function GraphControls({
@@ -30,6 +35,10 @@ export default function GraphControls({
   focusMode = false,
   onFocusModeToggle,
   hasIssueResult = false,
+  activeKinds,
+  activeLanguages,
+  onKindsChange,
+  onLanguagesChange,
 }: GraphControlsProps) {
   return (
     <div
@@ -40,10 +49,78 @@ export default function GraphControls({
         border: "1px solid #30363d",
         borderRadius: "12px",
         marginBottom: "12px",
+        minHeight: "54px",
       }}
     >
-      {/* Search */}
-      {/* <div className="relative flex-1 min-w-[200px] max-w-[320px]">
+      {/* View Toggle */}
+      <div className="flex rounded-lg overflow-hidden shrink-0" style={{ border: "1px solid #30363d", height: "32px" }}>
+        <button
+          id="view-file-graph-btn"
+          onClick={() => onViewChange("file-graph")}
+          className="px-3 flex items-center justify-center text-xs font-medium transition-colors"
+          style={{
+            background: view === "file-graph" ? "#1f6feb" : "#161b22",
+            color: view === "file-graph" ? "#fff" : "#8b949e",
+          }}
+        >
+          File Graph
+        </button>
+        <button
+          onClick={() => hasFunctionSelected && onViewChange("function-graph")}
+          disabled={!hasFunctionSelected}
+          className="px-3 flex items-center justify-center text-xs font-medium transition-colors"
+          style={{
+            background: view === "function-graph" ? "#1f6feb" : "#161b22",
+            color: view === "function-graph" ? "#fff" : hasFunctionSelected ? "#8b949e" : "#484f58",
+            cursor: hasFunctionSelected ? "pointer" : "not-allowed",
+            borderLeft: "1px solid #30363d",
+          }}
+          title={hasFunctionSelected ? "Switch to Function Graph" : "Select a function first"}
+        >
+          Function Graph
+        </button>
+      </div>
+
+      {/* Reset View Button */}
+      <button
+        onClick={onResetView}
+        className="px-3 rounded-lg flex items-center justify-center text-xs font-medium transition-colors border shrink-0 hover:bg-[#21262d]"
+        style={{
+          background: "#161b22",
+          color: "#8b949e",
+          border: "1px solid #30363d",
+          height: "32px",
+        }}
+        title="Reset zoom & clear search"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="mr-1.5">
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+          <path d="M3 3v5h5" />
+        </svg>
+        Reset View
+      </button>
+
+      {/* Focus Mode Toggle */}
+      {hasIssueResult && onFocusModeToggle && (
+        <button
+          onClick={onFocusModeToggle}
+          className="px-3 rounded-lg flex items-center justify-center text-xs font-medium transition-colors border shrink-0 hover:opacity-80"
+          style={{
+            background: focusMode ? "rgba(249,115,22,0.15)" : "#161b22",
+            color: focusMode ? "#f97316" : "#8b949e",
+            border: focusMode ? "1px solid rgba(249,115,22,0.4)" : "1px solid #30363d",
+            height: "32px",
+          }}
+        >
+          {focusMode ? "Show all files" : "Focus on affected"}
+        </button>
+      )}
+
+      {/* Vertical separator */}
+      <div className="hidden sm:block w-px h-5 mx-1" style={{ background: "#30363d" }} />
+
+      {/* Search Input */}
+      <div className="relative flex-1 min-w-[150px]">
         <svg
           className="absolute left-3 top-1/2 -translate-y-1/2"
           width="14"
@@ -62,13 +139,14 @@ export default function GraphControls({
           placeholder="Search files..."
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
-          className="w-full pl-9 pr-3 py-1.5 rounded-lg text-sm outline-none"
+          className="w-full pl-9 pr-8 rounded-lg text-sm outline-none transition-colors focus:border-[#58a6ff]"
           style={{
             background: "#161b22",
             border: "1px solid #30363d",
             color: "#e6edf3",
             fontFamily: "var(--font-geist-mono), monospace",
             fontSize: "12px",
+            height: "32px",
           }}
           autoComplete="off"
           spellCheck={false}
@@ -76,106 +154,44 @@ export default function GraphControls({
         {searchQuery && (
           <button
             onClick={() => onSearchChange("")}
-            className="absolute right-2 top-1/2 -translate-y-1/2 hover:opacity-80"
-            style={{ color: "#484f58", fontSize: "14px" }}
+            className="absolute right-2 top-1/2 -translate-y-1/2 hover:text-[#e6edf3] transition-colors"
+            style={{ color: "#484f58", fontSize: "14px", height: "20px", width: "20px", display: "flex", alignItems: "center", justifyContent: "center" }}
           >
             ✕
           </button>
         )}
-      </div> */}
-
-      {/* View toggle */}
-      <div className="flex flex-col gap-1">
-        <div
-          className="flex rounded-lg overflow-hidden"
-          style={{ border: "1px solid #30363d" }}
-        >
-          <button
-            id="view-file-graph-btn"
-            onClick={() => onViewChange("file-graph")}
-            className="px-3 py-1.5 text-xs font-medium transition-colors"
-            style={{
-              background: view === "file-graph" ? "#1f6feb" : "#161b22",
-              color: view === "file-graph" ? "#fff" : "#8b949e",
-            }}
-          >
-            File Graph
-          </button>
-          <button
-            id="view-function-graph-btn"
-            onClick={() => hasFunctionSelected && onViewChange("function-graph")}
-            className="px-3 py-1.5 text-xs font-medium transition-colors"
-            style={{
-              background:
-                view === "function-graph" ? "#1f6feb" : "#161b22",
-              color: view === "function-graph" ? "#fff" : hasFunctionSelected ? "#8b949e" : "#484f58",
-              cursor: hasFunctionSelected ? "pointer" : "not-allowed",
-            }}
-            title={
-              hasFunctionSelected
-                ? "Switch to function graph"
-                : "Click a file → then click a function in the panel to activate"
-            }
-          >
-            Function Graph
-          </button>
-        </div>
-        {!hasFunctionSelected && (
-          <span className="text-[10px] pl-1" style={{ color: "#484f58" }}>
-            ↑ Click a file → click a function to unlock
-          </span>
-        )}
       </div>
 
-      {/* Reset */}
-      <button
-        id="reset-view-btn"
-        onClick={onResetView}
-        className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80"
-        style={{
-          background: "#161b22",
-          border: "1px solid #30363d",
-          color: "#8b949e",
-        }}
-      >
-        Reset View
-      </button>
+      {/* Filters Dropdown */}
+      <div className="shrink-0">
+        <FiltersDropdown
+          activeKinds={activeKinds}
+          activeLanguages={activeLanguages}
+          onKindsChange={onKindsChange}
+          onLanguagesChange={onLanguagesChange}
+        />
+      </div>
 
       {/* Advanced Search */}
       {onSearchOpen && (
         <button
-          id="advanced-search-btn"
           onClick={onSearchOpen}
-          className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80 flex items-center gap-1.5"
+          className="px-3 rounded-lg flex items-center justify-center text-xs font-medium transition-colors border shrink-0 hover:opacity-80"
           style={{
             background: "#161b22",
-            border: "1px solid #30363d",
             color: "#58a6ff",
+            border: "1px solid #30363d",
+            height: "32px",
           }}
         >
-          <span>🔍</span>
+          <span className="mr-1.5">🔍</span>
           <span>Search</span>
-          <span className="text-[10px] px-1 rounded" style={{ background: "rgba(88,166,255,0.12)", color: "#58a6ff" }}>⌘K</span>
-        </button>
-      )}
-
-      {/* Focus Mode Toggle */}
-      {hasIssueResult && onFocusModeToggle && (
-        <button
-          onClick={onFocusModeToggle}
-          className="px-3 py-1.5 rounded-lg text-xs font-medium transition-colors hover:opacity-80 flex items-center gap-1.5"
-          style={{
-            background: focusMode ? "rgba(249,115,22,0.15)" : "#161b22",
-            border: `1px solid ${focusMode ? "rgba(249,115,22,0.3)" : "#30363d"}`,
-            color: focusMode ? "#f97316" : "#8b949e",
-          }}
-        >
-          {focusMode ? "Show all files" : "Focus on affected"}
+          <span className="text-[10px] px-1 rounded ml-1.5" style={{ background: "rgba(88,166,255,0.12)" }}>⌘K</span>
         </button>
       )}
 
       {/* Stats */}
-      <span className="text-xs ml-auto" style={{ color: "#484f58" }}>
+      <span className="text-xs ml-auto shrink-0" style={{ color: "#484f58" }}>
         {fileCount} files · {edgeCount} edges
       </span>
     </div>
