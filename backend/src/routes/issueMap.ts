@@ -159,7 +159,8 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
 
         console.log(`[issueMap] Fetched issue #${issueNumber}: ${issue.title} (${comments.length} comments)`);
 
-        // Step 4 — Deterministic matching via inline search index
+
+        // Step 4 -- Deterministic matching via inline search index
         // Sort files by architectural importance (descending), cap at 200
         const sortedFiles = [...graphData.files]
             .sort((a, b) => (b.architecturalImportance ?? 0) - (a.architecturalImportance ?? 0))
@@ -190,51 +191,73 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
             console.log(`[issueMap] Top deterministic file: ${deterministicFiles[0].fileId} (${deterministicFiles[0].confidence}%)`);
         }
 
-        // Step 5 — AI fallback if confidence < 70 and Gemini key is configured
-        let affectedFiles   = deterministicFiles;
+        // Step 5 -- PR-based files (most reliable), then AI fallback
+        let affectedFiles: AffectedFile[] = deterministicFiles;
         let affectedFunctions = deterministicFunctions;
         let source: IssueMapResponse["source"] = "deterministic";
         let summary: string | undefined;
 
-        console.log(`[issueMap] Evaluating AI fallback. Deterministic confidence: ${deterministicConfidence}. API Key present: ${!!config.gemini.apiKey}`);
-
-        if (deterministicConfidence < 70 && config.gemini.apiKey) {
-            // Build context (no file contents available at this layer — that's Phase 2)
-            const issueContextInput = { title: issue.title, body: issue.body, comments, linkedPRs };
-            const keywordHints = deterministicFiles.map(f => f.fileId);
-
-            const geminiResult = await callGeminiForMapping(
-                issueContextInput,
-                sortedFiles,
-                keywordHints
-            );
-
-            if (geminiResult) {
-                // Merge: AI results take priority, keep deterministic hits AI missed
-                const aiFileIds = new Set(geminiResult.affectedFiles.map(f => f.fileId));
-                const merged = [...geminiResult.affectedFiles];
-                for (const df of deterministicFiles) {
-                    if (!aiFileIds.has(df.fileId)) merged.push(df);
+        // Build PR-based file list from linked PRs
+        const graphFileIds = new Set(sortedFiles.map(f => f.id));
+        const prBasedFiles: AffectedFile[] = [];
+        for (const pr of linkedPRs) {
+            for (const changedFile of pr.changedFiles) {
+                if (graphFileIds.has(changedFile) && !prBasedFiles.some(f => f.fileId === changedFile)) {
+                    prBasedFiles.push({
+                        fileId: changedFile,
+                        confidence: pr.merged ? 95 : 80,
+                        reason: `Changed in PR #${pr.number}: ${pr.title}`,
+                    });
                 }
-                affectedFiles = merged;
-                source = "ai";
-                summary = geminiResult.summary;
-                console.log(`[issueMap] Gemini mapping succeeded. Found ${geminiResult.affectedFiles.length} files. Summary: ${summary.slice(0, 100)}...`);
-            } else {
-                console.log(`[issueMap] Gemini mapping failed. Falling back to deterministic results.`);
             }
-        } else if (deterministicConfidence < 70) {
-            console.log(`[issueMap] Gemini key not configured, using deterministic only`);
-        } else {
-            console.log(`[issueMap] Deterministic confidence (${deterministicConfidence}) >= 70. Skipping AI step.`);
         }
 
-        // Overall confidence — max of all affected files
+        console.log(`[issueMap] Linked PRs: ${linkedPRs.length}. PR-based files: ${prBasedFiles.length}. Deterministic confidence: ${deterministicConfidence}. API Key present: ${!!config.gemini.apiKey}`);
+
+        if (prBasedFiles.length > 0) {
+            console.log(`[issueMap] PR data found -- ${prBasedFiles.length} files from linked PRs`);
+            affectedFiles = [...prBasedFiles];
+            const prFileIds = new Set(prBasedFiles.map(f => f.fileId));
+            for (const df of deterministicFiles) {
+                if (!prFileIds.has(df.fileId)) affectedFiles.push(df);
+            }
+            source = "deterministic";
+        } else {
+            if (config.gemini.apiKey) {
+                const issueContextInput = { title: issue.title, body: issue.body, comments, linkedPRs };
+                const keywordHints = deterministicFiles.map(f => f.fileId);
+
+                const geminiResult = await callGeminiForMapping(
+                    issueContextInput,
+                    sortedFiles,
+                    keywordHints
+                );
+
+                if (geminiResult && geminiResult.affectedFiles.length > 0) {
+                    const aiFileIds = new Set(geminiResult.affectedFiles.map(f => f.fileId));
+                    affectedFiles = [...geminiResult.affectedFiles];
+                    for (const df of deterministicFiles) {
+                        if (!aiFileIds.has(df.fileId)) affectedFiles.push(df);
+                    }
+                    source = "ai";
+                    summary = geminiResult.summary;
+                    console.log(`[issueMap] Gemini mapping succeeded. Found ${geminiResult.affectedFiles.length} files. Summary: ${(summary ?? "").slice(0, 100)}...`);
+                } else {
+                    console.log(`[issueMap] Gemini returned no files. Falling back to deterministic results.`);
+                    affectedFiles = deterministicFiles;
+                }
+            } else {
+                console.log(`[issueMap] No Gemini key -- deterministic only`);
+                affectedFiles = deterministicFiles;
+            }
+        }
+
+        // Overall confidence
         const overallConfidence = affectedFiles.length > 0
             ? Math.max(...affectedFiles.map(f => f.confidence))
             : deterministicConfidence;
 
-        // Step 6 — Cache forever (no TTL)
+        // Step 6 -- Cache forever (no TTL)
         const response: IssueMapResponse = {
             issueNumber,
             issueTitle:   issue.title,

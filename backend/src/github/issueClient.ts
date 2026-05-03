@@ -1,4 +1,4 @@
-﻿// backend/src/github/issueClient.ts
+// backend/src/github/issueClient.ts
 
 import { Octokit } from "@octokit/rest";
 import { config } from "../config/config";
@@ -100,53 +100,72 @@ export async function fetchIssueComments(
     }
 }
 
-// Fetch PRs that reference this issue and their changed files
-// This is the most valuable data â€” if a PR exists, we know exactly
-// which files need to change without any AI guessing
+// Fetch PRs linked to this issue using timeline events
+// This is the reliable way — GitHub tracks cross-references automatically
 export async function fetchLinkedPRs(
     owner: string,
     repo: string,
     issueNumber: number
 ): Promise<LinkedPR[]> {
     try {
-        // Search for PRs that mention this issue number
-        const { data } = await octokit.search.issuesAndPullRequests({
-            q: `repo:${owner}/${repo} is:pr #${issueNumber} in:body`,
-            per_page: 5,
+        // Use timeline API to find cross-referenced PRs
+        const { data: timeline } = await octokit.issues.listEventsForTimeline({
+            owner,
+            repo,
+            issue_number: issueNumber,
+            per_page: 100,
+            headers: {
+                accept: "application/vnd.github.mockingbird-preview+json",
+            },
         });
+
+        // Find cross-reference events that are PRs
+        const prNumbers = new Set<number>();
+        for (const event of timeline) {
+            if (
+                event.event === "cross-referenced" &&
+                (event as any).source?.type === "issue" &&
+                (event as any).source?.issue?.pull_request
+            ) {
+                prNumbers.add((event as any).source.issue.number);
+            }
+        }
+
+        if (prNumbers.size === 0) return [];
 
         const prs: LinkedPR[] = [];
 
-        for (const item of data.items.slice(0, 3)) {
-            if (!item.pull_request) continue;
-
+        for (const prNumber of [...prNumbers].slice(0, 5)) {
             try {
-                // Get PR details including merge status
                 const { data: prData } = await octokit.pulls.get({
-                    owner, repo,
-                    pull_number: item.number,
+                    owner,
+                    repo,
+                    pull_number: prNumber,
                 });
 
-                // Get files changed in this PR
                 const { data: filesData } = await octokit.pulls.listFiles({
-                    owner, repo,
-                    pull_number: item.number,
+                    owner,
+                    repo,
+                    pull_number: prNumber,
                     per_page: 30,
                 });
 
                 prs.push({
-                    number: item.number,
-                    title: item.title,
+                    number: prNumber,
+                    title: prData.title,
                     state: prData.state,
                     merged: prData.merged ?? false,
                     changedFiles: filesData.map((f) => f.filename),
-                    htmlUrl: item.html_url,
+                    htmlUrl: prData.html_url,
                 });
             } catch {
-                // Skip this PR if we can't fetch details
                 continue;
             }
         }
+
+        console.log(
+            `[issueClient] found ${prs.length} linked PRs for #${issueNumber} via timeline`
+        );
 
         return prs;
     } catch {
