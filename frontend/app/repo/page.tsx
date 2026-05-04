@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, Suspense, useMemo } from "react";
-import { fetchFileContent } from "../lib/client";
+import { fetchFileContent, fetchFileFunctions } from "../lib/client";
+import { sanitizeFileId } from "../lib/graphHelpers";
 import { useRouter, useSearchParams } from "next/navigation";
 import Navbar from "../components/Navbar";
 import Sidebar from "../components/Sidebar";
@@ -29,18 +30,40 @@ function RepoPageContent() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
+    const stored = sessionStorage.getItem('codemap_graph');
+    if (!stored) {
+      console.log('[repo] no graph data in sessionStorage, redirecting');
+      router.replace('/');
+      return;
+    }
+
     try {
-      const stored = sessionStorage.getItem("codemap-result");
-      if (stored) {
-        setResult(JSON.parse(stored));
+      const graphData = JSON.parse(stored);
+
+      // Also try to load function files
+      let functionFiles = {};
+      const storedFunctions = sessionStorage.getItem('codemap_functions');
+      if (storedFunctions) {
+        functionFiles = JSON.parse(storedFunctions);
       }
-    } catch {}
+
+      setResult({
+        ...graphData,
+        _functionFiles: functionFiles
+      });
+
+      console.log('[repo] loaded graph from sessionStorage:', graphData._inlineFileGraph?.files?.length, 'files');
+    } catch (err) {
+      console.error('[repo] Failed to parse stored graph data:', err);
+      router.replace('/');
+    }
     setLoaded(true);
-  }, []);
+  }, [router]);
 
   // Redirect if no data
   useEffect(() => {
     if (loaded && !result?._inlineFileGraph) {
+      console.log('[page] redirecting to landing, reason:', 'missing _inlineFileGraph in result', { loaded, hasResult: !!result });
       router.replace("/");
     }
   }, [loaded, result, router]);
@@ -65,8 +88,13 @@ function RepoPageContent() {
 
   // ── Core data ───────────────────────────────────────────────────────────────
   const fileGraph = result?._inlineFileGraph ?? null;
-  const functionFiles: Record<string, FunctionFilePayload> | null =
-    result?._functionFiles ?? null;
+  const [fetchedFunctions, setFetchedFunctions] = useState<Record<string, FunctionFilePayload>>({});
+
+  const functionFiles: Record<string, FunctionFilePayload> | null = useMemo(() => {
+    const base = result?._functionFiles ?? {};
+    if (Object.keys(base).length === 0 && Object.keys(fetchedFunctions).length === 0) return null;
+    return { ...base, ...fetchedFunctions };
+  }, [result?._functionFiles, fetchedFunctions]);
   const owner = result?.owner ?? searchParams.get("repo")?.split("/")[0] ?? "";
   const repo = result?.repo ?? searchParams.get("repo")?.split("/")[1] ?? "";
   const commitSha = result?.commitSha ?? "";
@@ -160,7 +188,7 @@ function RepoPageContent() {
       document.body.style.userSelect = "";
       document.removeEventListener("mousemove", handleMouseMove);
       document.removeEventListener("mouseup", handleMouseUp);
-      try { localStorage.setItem("codemap-right-sidebar-width", String(rightSidebarWidth)); } catch {}
+      try { localStorage.setItem("codemap-right-sidebar-width", String(rightSidebarWidth)); } catch { }
     };
 
     document.addEventListener("mousemove", handleMouseMove);
@@ -168,7 +196,7 @@ function RepoPageContent() {
   };
 
   useEffect(() => {
-    try { localStorage.setItem("codemap-right-sidebar-width", String(rightSidebarWidth)); } catch {}
+    try { localStorage.setItem("codemap-right-sidebar-width", String(rightSidebarWidth)); } catch { }
   }, [rightSidebarWidth]);
 
   // ── Focus mode ──────────────────────────────────────────────────────────────
@@ -291,8 +319,8 @@ function RepoPageContent() {
   // ── All functions (for IssueMapper) ─────────────────────────────────────────
   const allFunctions = fileGraph
     ? fileGraph.files.flatMap(f =>
-        (functionFiles?.[f.id.replace(/[^a-zA-Z0-9]/g, "_")] ?? functionFiles?.[f.id])?.functions ?? []
-      )
+      (functionFiles?.[sanitizeFileId(f.id)] ?? functionFiles?.[f.id])?.functions ?? []
+    )
     : [];
 
   // ── Connected files for chat ────────────────────────────────────────────────
@@ -317,9 +345,22 @@ function RepoPageContent() {
     setSelectedFile(file);
     setCodeViewerFileId(null);
     setCodeContent(null);
+
+    // Lazy fetch functions if not already available
+    const sid = sanitizeFileId(file.id);
+    const hasFunctions = (result?._functionFiles && result._functionFiles[sid]) || fetchedFunctions[file.id] || fetchedFunctions[sid];
+    
+    if (!hasFunctions && result?.commitSha) {
+      fetchFileFunctions(owner, repo, result.commitSha, file.id)
+        .then(payload => {
+          setFetchedFunctions(prev => ({ ...prev, [file.id]: payload, [sid]: payload }));
+        })
+        .catch(err => console.warn('[repo] Failed to fetch functions for', file.id, err));
+    }
+
     // Push history: navigated to a file
     pushHistory({ view: "file-graph", fileId: file.id, fnId: null, fnName: null });
-  }, [pushHistory]);
+  }, [pushHistory, result, fetchedFunctions, owner, repo]);
 
   const handleFileNavigate = useCallback((fileId: string) => {
     if (!fileGraph) return;
@@ -328,9 +369,19 @@ function RepoPageContent() {
       setSelectedFile(file);
       setCodeViewerFileId(null);
       setCodeContent(null);
+
+      const hasFunctions = (result?._functionFiles && result._functionFiles[file.id]) || fetchedFunctions[file.id];
+      if (!hasFunctions && result?.commitSha) {
+        fetchFileFunctions(owner, repo, result.commitSha, file.id)
+          .then(payload => {
+            setFetchedFunctions(prev => ({ ...prev, [file.id]: payload }));
+          })
+          .catch(err => console.warn('[repo] Failed to fetch functions for', file.id, err));
+      }
+
       pushHistory({ view: "file-graph", fileId: file.id, fnId: null, fnName: null });
     }
-  }, [fileGraph, pushHistory]);
+  }, [fileGraph, pushHistory, result, fetchedFunctions, owner, repo]);
 
   const handleFunctionClick = useCallback((fn: FunctionNodeDTO) => {
     setSelectedFunction(fn);
@@ -597,62 +648,62 @@ function RepoPageContent() {
         </div>
 
         {/* ── Right Panel ────────────────────────────────────────────── */}
-        <div 
+        <div
           className="shrink-0 flex overflow-hidden"
-          style={{ 
+          style={{
             width: selectedFile ? `${rightSidebarWidth + 12}px` : "0px",
             transition: isRightDragging ? "none" : "width 0.25s cubic-bezier(0.4, 0, 0.2, 1)"
           }}
         >
           {selectedFile && (
             <>
-              <div 
+              <div
                 onMouseDown={handleRightResizeMouseDown}
-              style={{
-                cursor: "col-resize",
-                width: "12px",
-                flexShrink: 0,
-                display: "flex",
-                justifyContent: "center",
-                background: "transparent",
-                zIndex: 10
-              }}
-              className="hover:bg-blue-500/20 transition-colors group"
-              title="Resize sidebar"
-            >
-              <div className="h-full group-hover:bg-blue-500 transition-colors" style={{ width: "1px", background: "#21262d" }} />
-            </div>
-            <div
-              className="shrink-0 overflow-hidden"
-              style={{
-                width: `${rightSidebarWidth}px`,
-              }}
-            >
-            <DetailsPanel
-              file={selectedFile}
-              edges={fileGraph.importEdges}
-              owner={owner}
-              repo={repo}
-              commitSha={commitSha}
-              functionFiles={functionFiles}
-              onClose={() => setSelectedFile(null)}
-              onFileNavigate={handleFileNavigate}
-              onFunctionClick={handleFunctionClick}
-              issueResult={issueResult}
-              codeContent={codeViewerFileId === selectedFile.id ? codeContent : null}
-              onViewSource={handleViewSource}
-              isLoadingCode={isLoadingCode}
-              onOpenChat={handleOpenChat}
-              activeTab={sidebarTab}
-              onTabChange={setSidebarTab}
-              chatMessages={chatMessages}
-              setChatMessages={setChatMessages}
-              isChatLoading={isChatLoading}
-              setIsChatLoading={setIsChatLoading}
-            />
-            </div>
-          </>
-        )}
+                style={{
+                  cursor: "col-resize",
+                  width: "12px",
+                  flexShrink: 0,
+                  display: "flex",
+                  justifyContent: "center",
+                  background: "transparent",
+                  zIndex: 10
+                }}
+                className="hover:bg-blue-500/20 transition-colors group"
+                title="Resize sidebar"
+              >
+                <div className="h-full group-hover:bg-blue-500 transition-colors" style={{ width: "1px", background: "#21262d" }} />
+              </div>
+              <div
+                className="shrink-0 overflow-hidden"
+                style={{
+                  width: `${rightSidebarWidth}px`,
+                }}
+              >
+                <DetailsPanel
+                  file={selectedFile}
+                  edges={fileGraph.importEdges}
+                  owner={owner}
+                  repo={repo}
+                  commitSha={commitSha}
+                  functionFiles={functionFiles}
+                  onClose={() => setSelectedFile(null)}
+                  onFileNavigate={handleFileNavigate}
+                  onFunctionClick={handleFunctionClick}
+                  issueResult={issueResult}
+                  codeContent={codeViewerFileId === selectedFile.id ? codeContent : null}
+                  onViewSource={handleViewSource}
+                  isLoadingCode={isLoadingCode}
+                  onOpenChat={handleOpenChat}
+                  activeTab={sidebarTab}
+                  onTabChange={setSidebarTab}
+                  chatMessages={chatMessages}
+                  setChatMessages={setChatMessages}
+                  isChatLoading={isChatLoading}
+                  setIsChatLoading={setIsChatLoading}
+                />
+              </div>
+            </>
+          )}
         </div>
       </div>
 

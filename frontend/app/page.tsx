@@ -30,13 +30,50 @@ export default function Home() {
 
   // ── Navigate to /repo on completion ─────────────────────────────────────────
   useEffect(() => {
-    if (status === "done" && result?._inlineFileGraph) {
-      try {
-        sessionStorage.setItem("codemap-result", JSON.stringify(result));
-      } catch {}
-      const owner = result.owner || "";
-      const repo = result.repo || "";
-      router.push(`/repo?repo=${owner}/${repo}`);
+    if (status === "done") {
+      console.log('[page] job done, navigating to graph');
+      console.log('[page] fileGraph files:', result?._inlineFileGraph?.files?.length);
+
+      if (result?._inlineFileGraph) {
+        try {
+          const graphPayload = {
+            owner: result.owner,
+            repo: result.repo,
+            commitSha: result.commitSha,
+            defaultBranch: result.defaultBranch,
+            stats: result.stats,
+            fileGraphUrl: result.fileGraphUrl,
+            functionsBaseUrl: result.functionsBaseUrl,
+            _inlineFileGraph: result._inlineFileGraph,
+          };
+
+          const functionsJson = JSON.stringify(result._functionFiles ?? {});
+          const functionsSizeMB = (functionsJson.length / 1024 / 1024).toFixed(1);
+          console.log('[page] functions data size:', functionsSizeMB, 'MB');
+
+          try {
+            sessionStorage.setItem('codemap_graph', JSON.stringify(graphPayload));
+            if (parseFloat(functionsSizeMB) < 4) {
+              sessionStorage.setItem('codemap_functions', functionsJson);
+            } else {
+              console.log('[page] functions too large for sessionStorage, will fetch per-file');
+              sessionStorage.removeItem('codemap_functions');
+            }
+          } catch (storageErr) {
+            console.warn('[page] sessionStorage quota exceeded, storing file graph only');
+            sessionStorage.setItem('codemap_graph', JSON.stringify(graphPayload));
+            sessionStorage.removeItem('codemap_functions');
+          }
+        } catch (err) {
+          console.error('[page] Failed to persist graph data:', err);
+        }
+
+        const owner = result.owner || "";
+        const repo = result.repo || "";
+        router.push(`/repo?repo=${owner}/${repo}`);
+      } else {
+        console.log('[page] redirecting to landing, reason: no _inlineFileGraph on done status');
+      }
     }
   }, [status, result, router]);
 

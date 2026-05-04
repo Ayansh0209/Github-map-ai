@@ -9,6 +9,7 @@ import statusRoute from "./routes/status";
 import searchRoute from "./routes/search";
 import issueMapRoute from "./routes/issueMap";
 import fileContentRoute from "./routes/fileContent";
+import functionsRoute from "./routes/functions";
 
 const app = express();
 
@@ -23,6 +24,7 @@ app.use("/status", statusRoute);
 app.use("/search", searchRoute);
 app.use("/issue-map", issueMapRoute);
 app.use("/file-content", fileContentRoute);
+app.use("/functions", functionsRoute);
 
 app.get("/", (req, res) => {
     res.send("CodeMap AI Backend Running");

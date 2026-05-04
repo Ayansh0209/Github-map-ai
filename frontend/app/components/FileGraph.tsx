@@ -27,6 +27,10 @@ interface SimNode extends d3.SimulationNodeDatum {
   folder: string;
   degree: number;
   isHub: boolean;
+  importance: number;
+  isGroup?: boolean;
+  childCount?: number;
+  hop?: number;
 }
 
 interface SimLink extends d3.SimulationLinkDatum<SimNode> {
@@ -74,6 +78,21 @@ export default function FileGraph({
   const selectedFileIdRef = useRef(selectedFileId);
   const [error, setError] = useState<string | null>(null);
   const [isLegendOpen, setIsLegendOpen] = useState(true);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const allFilesRef = useRef(files);
+  const allEdgesRef = useRef(edges);
+  useEffect(() => { allFilesRef.current = files; allEdgesRef.current = edges; }, [files, edges]);
+
+  // ── Focus mode states ───────────────────────────────────────────────────────
+  const [focusDepth, setFocusDepth] = useState<1 | 2 | "all">(1);
+  const [focusSearch, setFocusSearch] = useState("");
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [isFocusUIOpen, setIsFocusUIOpen] = useState(true);
+
+  // ── UX Persistence Refs ─────────────────────────────────────────────────────
+  const hasAnimatedRef = useRef(false);
+  const zoomStateRef = useRef<d3.ZoomTransform | null>(null);
+  const mainGraphZoomBeforeFocusRef = useRef<d3.ZoomTransform | null>(null);
 
   useEffect(() => { onFileClickRef.current = onFileClick; }, [onFileClick]);
   useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
@@ -182,8 +201,20 @@ export default function FileGraph({
 
   // ── Main graph build ─────────────────────────────────────────────────────────
   useEffect(() => {
+    if (focusedNodeId) {
+      // Store zoom before entering focus
+      if (svgRef.current) {
+        mainGraphZoomBeforeFocusRef.current = d3.zoomTransform(svgRef.current.node()!);
+      }
+      return;
+    }
     if (!containerRef.current || files.length === 0) return;
     autoFittedRef.current = false;
+
+    // Preserve existing node positions
+    const previousNodes = new Map<string, SimNode>();
+    simulationRef.current?.nodes().forEach(n => previousNodes.set(n.id, n));
+
     simulationRef.current?.stop();
     d3.select(containerRef.current).selectAll("*").remove();
     setError(null);
@@ -193,21 +224,40 @@ export default function FileGraph({
     const height = container.clientHeight || 600;
 
     try {
-      // 1. Degrees
+      // 1. Precompute degrees and importance
+      const inDegrees = new Map<string, number>();
+      const outDegrees = new Map<string, number>();
       const degreeMap = new Map<string, number>();
+
       for (const e of edges) {
+        inDegrees.set(e.target, (inDegrees.get(e.target) || 0) + 1);
+        outDegrees.set(e.source, (outDegrees.get(e.source) || 0) + 1);
         degreeMap.set(e.source, (degreeMap.get(e.source) || 0) + 1);
         degreeMap.set(e.target, (degreeMap.get(e.target) || 0) + 1);
       }
+
+      const getImportance = (f: FileNodeDTO) => (inDegrees.get(f.id) || 0) * 1.2 + (outDegrees.get(f.id) || 0) * 1.0 + (f.isEntryPoint ? 5 : 0);
+
       const sorted = [...degreeMap.values()].sort((a, b) => b - a);
       const top20Threshold = sorted[Math.floor(sorted.length * 0.20)] ?? 3;
-      const hubThreshold = sorted[Math.floor(sorted.length * 0.10)] ?? Infinity;
 
       // 2. Build nodes
       const nodeMap = new Map<string, SimNode>();
       const nodes: SimNode[] = files.map(f => {
         const deg = degreeMap.get(f.id) || 0;
-        const n: SimNode = { id: f.id, data: f, folder: getFolderGroup(f.id), degree: deg, isHub: deg >= top20Threshold && deg > 0 };
+        const prev = previousNodes.get(f.id);
+        const n: SimNode = {
+          id: f.id,
+          data: f,
+          folder: getFolderGroup(f.id),
+          degree: deg,
+          isHub: deg >= top20Threshold && deg > 0,
+          importance: getImportance(f),
+          x: prev?.x,
+          y: prev?.y,
+          vx: prev?.vx,
+          vy: prev?.vy
+        };
         nodeMap.set(f.id, n);
         return n;
       });
@@ -335,9 +385,20 @@ export default function FileGraph({
       const g = svg.append("g");
       gRef.current = g;
       const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.05, 8])
-        .on("zoom", ev => g.attr("transform", ev.transform));
+        .on("zoom", ev => {
+          g.attr("transform", ev.transform);
+          zoomStateRef.current = ev.transform;
+        });
       zoomRef.current = zoom;
       svg.call(zoom);
+
+      // Restore zoom transform if we have one
+      if (mainGraphZoomBeforeFocusRef.current) {
+        svg.call(zoom.transform, mainGraphZoomBeforeFocusRef.current);
+        mainGraphZoomBeforeFocusRef.current = null; // consume it
+      } else if (zoomStateRef.current) {
+        svg.call(zoom.transform, zoomStateRef.current);
+      }
 
       // Expose reset zoom via ref
       if (resetZoomRef) {
@@ -448,7 +509,7 @@ export default function FileGraph({
         .on("mouseover", function (ev, d) {
           if (selectedFileIdRef.current) return; // don't hover-highlight if something is locked
           d3.select(this).select(".hover-ring").attr("r", getRadius(d) + 4).attr("stroke-opacity", 0.8);
-          
+
           const conn = new Set([d.id]);
           links.forEach(l => { const s = (l.source as SimNode).id, t = (l.target as SimNode).id; if (s === d.id) conn.add(t); if (t === d.id) conn.add(s); });
           nodeG.attr("opacity", n => conn.has(n.id) ? 1 : 0.06);
@@ -476,13 +537,9 @@ export default function FileGraph({
           }).attr("marker-end", "url(#arrow-default)");
           tooltip.style("opacity", "0");
         })
-        .on("click", (_ev, d) => { onFileClickRef.current(d.data); })
-        .on("dblclick", function (ev, d) {
-          ev.stopPropagation();
-          if (!svgRef.current || !zoomRef.current || d.x == null || d.y == null) return;
-          const scale = 2.5;
-          svgRef.current.transition().duration(500).call(zoomRef.current.transform,
-            d3.zoomIdentity.translate(width / 2 - d.x * scale, height / 2 - d.y * scale).scale(scale));
+        .on("click", (_ev, d) => {
+          onFileClickRef.current(d.data);
+          setFocusedNodeId(d.id);
         });
 
       // 8. Simulation
@@ -491,19 +548,26 @@ export default function FileGraph({
         .alphaDecay(0.05)
         .velocityDecay(0.6)
         .force("link", d3.forceLink<SimNode, SimLink>(links).id(d => d.id).distance(link =>
-          (link.source as SimNode).data?.isEntryPoint || (link.target as SimNode).data?.isEntryPoint ? 140 : 85
+          (link.source as SimNode).data?.isEntryPoint || (link.target as SimNode).data?.isEntryPoint ? 200 : 150
         ))
-        .force("charge", d3.forceManyBody<SimNode>().strength(-220))
+        .force("charge", d3.forceManyBody<SimNode>().strength(-450))
         .force("collision", d3.forceCollide<SimNode>().radius(d => {
-          let r = getRadius(d) + 12;
-          if (d.data.isEntryPoint) r += 40;
-          else if (d.isHub) r += 20;
+          let r = getRadius(d) + 30;
+          if (d.data.isEntryPoint) r += 50;
+          else if (d.isHub) r += 30;
           return r;
         }).iterations(3))
         .force("x", d3.forceX<SimNode>(width / 2).strength(0.01))
         .force("y", d3.forceY<SimNode>(height / 2).strength(0.01))
         .force("center", d3.forceCenter(width / 2, height / 2).strength(0.02));
       simulationRef.current = sim;
+
+      if (!hasAnimatedRef.current) {
+        sim.alpha(1).restart();
+        hasAnimatedRef.current = true;
+      } else {
+        sim.alpha(0);
+      }
 
       sim.on("tick", () => {
         link.attr("x1", d => (d.source as SimNode).x!).attr("y1", d => (d.source as SimNode).y!)
@@ -559,7 +623,7 @@ export default function FileGraph({
     }
 
     return () => { simulationRef.current?.stop(); };
-  }, [files, edges]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [files, edges, focusedNodeId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Search filter ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -569,7 +633,7 @@ export default function FileGraph({
       nodeGRef.current.attr("opacity", 1);
       linkRef.current.attr("stroke-opacity", 0.7);
 
-      nodeGRef.current.selectAll("g.node-label")
+      nodeGRef.current.select<SVGGElement>("g.node-label")
         .attr("opacity", 1)
         .style("visibility", "visible")
         .classed("label-hidden", false);
@@ -578,17 +642,403 @@ export default function FileGraph({
     }
     nodeGRef.current.attr("opacity", (d: SimNode) =>
       d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0.04);
-    nodeGRef.current.selectAll("g.node-label").attr("opacity", (d: SimNode) =>
+    nodeGRef.current.select<SVGGElement>("g.node-label").attr("opacity", (d: SimNode) =>
       d.data.path.toLowerCase().includes(q) || d.data.label.toLowerCase().includes(q) ? 1 : 0);
     linkRef.current.attr("stroke-opacity", 0.02);
   }, [searchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Focus mode: subgraph extraction + radial re-layout ──────────────────────
+  useEffect(() => {
+    if (!focusedNodeId || !containerRef.current) return;
+
+    simulationRef.current?.stop();
+    const container = containerRef.current;
+
+    // Reset animation ref when entering focus so it can re-animate when we eventually exit
+    // Or keep it true if we want the main graph to stay still forever
+    // hasAnimatedRef.current = false; 
+
+    d3.select(container).selectAll("*").remove();
+
+    const width = container.clientWidth || 900;
+    const height = container.clientHeight || 600;
+    const centerX = width / 2;
+    const centerY = height / 2;
+
+    // 0. Precompute Global Importance for this subgraph
+    const inDegrees = new Map<string, number>();
+    const outDegrees = new Map<string, number>();
+    for (const e of edges) {
+      inDegrees.set(e.target, (inDegrees.get(e.target) || 0) + 1);
+      outDegrees.set(e.source, (outDegrees.get(e.source) || 0) + 1);
+    }
+    const getImportance = (f: FileNodeDTO) => (inDegrees.get(f.id) || 0) * 1.2 + (outDegrees.get(f.id) || 0) * 1.0 + (f.isEntryPoint ? 5 : 0);
+
+    // 1. Extraction with Hop Levels
+    const hopMap = new Map<string, number>();
+    hopMap.set(focusedNodeId, 0);
+    const leftIds = new Set<string>();
+    const rightIds = new Set<string>();
+    const visited = new Set<string>([focusedNodeId]);
+
+    const collect = (targetId: string, currentHop: number, side: 'left' | 'right' | 'center') => {
+      const maxHop = focusDepth === "all" ? 10 : focusDepth;
+      if (currentHop >= maxHop) return;
+
+      for (const e of edges) {
+        // Dependencies: what targetId imports (targetId is source)
+        if (e.source === targetId && !visited.has(e.target)) {
+          if (side === 'center' || side === 'left') {
+            hopMap.set(e.target, currentHop + 1);
+            leftIds.add(e.target);
+            visited.add(e.target);
+            collect(e.target, currentHop + 1, 'left');
+          }
+        }
+        // Dependents: who imports targetId (targetId is target)
+        if (e.target === targetId && !visited.has(e.source)) {
+          if (side === 'center' || side === 'right') {
+            hopMap.set(e.source, currentHop + 1);
+            rightIds.add(e.source);
+            visited.add(e.source);
+            collect(e.source, currentHop + 1, 'right');
+          }
+        }
+      }
+    };
+    collect(focusedNodeId, 0, 'center');
+
+    // 2. Build and Group
+    const centerFile = files.find(f => f.id === focusedNodeId);
+    if (!centerFile) return;
+
+    // SCALABILITY: If total nodes would be too many, force clustering
+    const totalPotentialNodes = visited.size;
+    const forceCluster = focusDepth === "all" && totalPotentialNodes > 150;
+
+    const buildNodes = (ids: Set<string>): SimNode[] => {
+      const colFiles = files.filter(f => ids.has(f.id));
+      const byFolder = new Map<string, FileNodeDTO[]>();
+      colFiles.forEach(f => {
+        const folder = getFolderGroup(f.id);
+        if (!byFolder.has(folder)) byFolder.set(folder, []);
+        byFolder.get(folder)!.push(f);
+      });
+
+      const result: SimNode[] = [];
+      byFolder.forEach((folderFiles, folder) => {
+        // Strict clustering if forceCluster is true
+        const isExpanded = !forceCluster && (expandedFolders.has(folder) || folderFiles.length <= 6);
+        if (isExpanded) {
+          folderFiles.forEach(f => result.push({ id: f.id, data: f, folder, degree: 0, isHub: false, importance: getImportance(f), hop: hopMap.get(f.id) }));
+        } else {
+          const avgHop = Math.round(folderFiles.reduce((a, f) => a + (hopMap.get(f.id) || 1), 0) / folderFiles.length);
+          result.push({ id: `folder:${folder}`, data: { ...folderFiles[0], label: folder, path: folder, kind: "folder" } as any, folder, degree: 0, isHub: true, importance: 0, isGroup: true, childCount: folderFiles.length, hop: avgHop });
+        }
+      });
+      return result;
+    };
+
+    const leftNodes = buildNodes(leftIds);
+    const rightNodes = buildNodes(rightIds);
+    const centerNode: SimNode = {
+      id: centerFile.id, data: centerFile, folder: getFolderGroup(centerFile.id),
+      degree: 0, isHub: false, importance: getImportance(centerFile), hop: 0,
+      x: centerX, y: centerY, fx: centerX, fy: centerY
+    };
+
+    const nodes = [centerNode, ...leftNodes, ...rightNodes];
+    const nodeLookup = new Map(nodes.map(n => [n.id, n]));
+
+    // 3. Adaptive Layout: Radial (1-hop) vs Tree (2-hop+)
+    const isTree = focusDepth === 2 || focusDepth === "all";
+
+    const applyLayout = () => {
+      if (!isTree) {
+        // Semi-Circle Radial Layout (1-hop)
+        const layoutSemi = (colNodes: SimNode[], isLeft: boolean) => {
+          const byHop = d3.groups(colNodes, n => n.hop || 1);
+          byHop.forEach(([hop, hopNodes]) => {
+            const radius = 240 * hop;
+            const angleSpan = Math.PI * 0.7;
+            const startAngle = isLeft ? Math.PI - angleSpan / 2 : -angleSpan / 2;
+            const step = hopNodes.length > 1 ? angleSpan / (hopNodes.length - 1) : 0;
+            hopNodes.sort((a, b) => (b.importance || 0) - (a.importance || 0)).forEach((n, i) => {
+              const angle = startAngle + i * step;
+              n.x = centerX + radius * Math.cos(angle);
+              n.y = centerY + radius * Math.sin(angle);
+            });
+          });
+        };
+        layoutSemi(leftNodes, true);
+        layoutSemi(rightNodes, false);
+      } else {
+        // Horizontal Tree Layout (2-hop+)
+        const hSpacing = 180;
+        const layoutTree = (colNodes: SimNode[], isLeft: boolean) => {
+          const byHop = d3.groups(colNodes, n => n.hop || 1);
+          byHop.forEach(([hop, hopNodes]) => {
+            const x = isLeft ? centerX - hop * hSpacing : centerX + hop * hSpacing;
+            const vSpacing = Math.max(22, Math.min(50, 850 / hopNodes.length));
+            const startY = centerY - ((hopNodes.length - 1) * vSpacing) / 2;
+            hopNodes.sort((a, b) => (b.importance || 0) - (a.importance || 0)).forEach((n, i) => {
+              n.x = x;
+              n.y = startY + i * vSpacing;
+            });
+          });
+        };
+        layoutTree(leftNodes, true);
+        layoutTree(rightNodes, false);
+      }
+    };
+    applyLayout();
+
+    // 4. Render
+    const svg = d3.select(container).append("svg").attr("width", "100%").attr("height", "100%").attr("viewBox", `0 0 ${width} ${height}`).style("opacity", "0");
+    svgRef.current = svg;
+
+    const defs = svg.append("defs");
+    defs.append("marker").attr("id", "arrow-dependency").attr("viewBox", "0 -5 10 10").attr("refX", 22).attr("refY", 0).attr("markerWidth", 4).attr("markerHeight", 4).attr("orient", "auto").append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#58a6ff");
+    defs.append("marker").attr("id", "arrow-dependent").attr("viewBox", "0 -5 10 10").attr("refX", 22).attr("refY", 0).attr("markerWidth", 4).attr("markerHeight", 4).attr("orient", "auto").append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#f87171");
+
+    const g = svg.append("g");
+    gRef.current = g;
+    const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.1, 8]).on("zoom", ev => g.attr("transform", ev.transform));
+    svg.call(zoom);
+
+    const links: SimLink[] = [];
+    edges.forEach(e => {
+      let s = e.source, t = e.target;
+      if (!nodeLookup.has(s)) { const f = getFolderGroup(s); if (nodeLookup.has(`folder:${f}`)) s = `folder:${f}`; }
+      if (!nodeLookup.has(t)) { const f = getFolderGroup(t); if (nodeLookup.has(`folder:${f}`)) t = `folder:${f}`; }
+      if (nodeLookup.has(s) && nodeLookup.has(t)) {
+        links.push({ source: s as any, target: t as any, data: e });
+      }
+    });
+
+    const diagonal = d3.linkHorizontal<any, any>().x(d => d.x).y(d => d.y);
+    const baseEdgeOpacity = Math.max(0.1, 0.4 - (nodes.length / 200) * 0.2);
+
+    const link = g.append("g").selectAll("path").data(links).join("path")
+      .attr("d", d => {
+        const s = nodeLookup.get(typeof d.source === "string" ? d.source : (d.source as any).id)!;
+        const t = nodeLookup.get(typeof d.target === "string" ? d.target : (d.target as any).id)!;
+        return diagonal({ source: { x: s.x, y: s.y }, target: { x: t.x, y: t.y } });
+      })
+      .attr("fill", "none")
+      .attr("stroke", d => {
+        const tid = typeof d.target === 'string' ? d.target : (d.target as any).id;
+        const sid = typeof d.source === 'string' ? d.source : (d.source as any).id;
+        if (tid === focusedNodeId || leftIds.has(tid)) return "#58a6ff"; // Dependency side
+        return "#f87171"; // Dependent side
+      })
+      .attr("stroke-width", 1)
+      .attr("stroke-opacity", d => {
+        const s = nodeLookup.get(typeof d.source === "string" ? d.source : (d.source as any).id)!;
+        const t = nodeLookup.get(typeof d.target === "string" ? d.target : (d.target as any).id)!;
+        return (s.hop && s.hop > 1) || (t.hop && t.hop > 1) ? baseEdgeOpacity * 0.5 : baseEdgeOpacity;
+      })
+      .attr("marker-end", d => {
+        const tid = typeof d.target === 'string' ? d.target : (d.target as any).id;
+        const sid = typeof d.source === 'string' ? d.source : (d.source as any).id;
+        if (tid === focusedNodeId || leftIds.has(tid)) return "url(#arrow-dependency)";
+        return "url(#arrow-dependent)";
+      });
+
+    const tooltip = d3.select(container).append("div").style("position", "absolute").style("background", "rgba(13,17,23,0.95)").style("border", "1px solid #30363d").style("border-radius", "8px").style("padding", "8px 12px").style("font-size", "12px").style("color", "#e6edf3").style("pointer-events", "none").style("opacity", "0").style("z-index", "100");
+
+    const nodeG = g.append("g").selectAll("g").data(nodes).join("g").attr("transform", d => `translate(${d.x}, ${d.y})`).style("cursor", "pointer");
+
+    nodeG.each(function (d) {
+      const g2 = d3.select(this);
+      const isFocused = d.id === focusedNodeId;
+      const isSearchMatch = !focusSearch || d.data.label.toLowerCase().includes(focusSearch.toLowerCase()) || d.folder.toLowerCase().includes(focusSearch.toLowerCase());
+      const hopOpacity = d.hop && d.hop > 1 ? 0.5 : 1;
+
+      let r = 7;
+      if (isFocused) r = 18;
+      else if (d.isGroup) r = 10;
+      else if (d.importance > 12) r = 9;
+      if (d.hop && d.hop > 1) r *= 0.85;
+
+      if (isFocused) {
+        g2.append("circle").attr("r", r + 18).attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 3).attr("stroke-opacity", 0.25).attr("class", "glow");
+        g2.append("circle").attr("r", r + 10).attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 1.5).attr("stroke-opacity", 0.4);
+      }
+
+      const circle = g2.append("circle").attr("r", r)
+        .attr("fill", isFocused ? "#f0883e" : (d.isGroup ? "#30363d" : getLanguageColor(d.data.language)))
+        .attr("stroke", isFocused ? "#f0883e" : "#0d1117").attr("stroke-width", 1.5)
+        .attr("opacity", isSearchMatch ? hopOpacity : 0.12);
+
+      if (d.isGroup) g2.append("text").attr("text-anchor", "middle").attr("dy", "0.35em").attr("fill", "#8b949e").attr("font-size", "9px").attr("font-weight", "bold").text("📁");
+
+      const labelText = d.isGroup ? `/${d.data.label} (${d.childCount})` : d.data.label;
+      const label = g2.append("g").attr("transform", `translate(0, ${r + 20})`);
+      label.append("text").attr("text-anchor", "middle")
+        .attr("fill", isFocused ? "#f0883e" : "#e6edf3").attr("font-size", r > 10 ? "11px" : "9px").attr("font-family", "monospace")
+        .attr("opacity", isSearchMatch ? hopOpacity : 0.1)
+        .text(trunc(labelText, isTree ? 25 : 20));
+    });
+
+    nodeG.on("mouseover", function (ev, d) {
+      tooltip.style("opacity", "1").html(d.isGroup ? `<strong>Folder: ${d.folder}</strong><br/>${d.childCount} files` : `<strong>${d.data.label}</strong><br/>${d.data.path}`).style("left", (ev.offsetX + 10) + "px").style("top", (ev.offsetY - 10) + "px");
+      const neighborhood = new Set([d.id]);
+      links.forEach(l => {
+        const sid = typeof l.source === "string" ? l.source : (l.source as any).id;
+        const tid = typeof l.target === "string" ? l.target : (l.target as any).id;
+        if (sid === d.id) neighborhood.add(tid); if (tid === d.id) neighborhood.add(sid);
+      });
+      nodeG.transition().duration(120).style("opacity", n => neighborhood.has(n.id) ? 1 : 0.08);
+      link.transition().duration(120).attr("stroke-opacity", l => {
+        const sid = typeof l.source === "string" ? l.source : (l.source as any).id;
+        const tid = typeof l.target === "string" ? l.target : (l.target as any).id;
+        return (sid === d.id || tid === d.id) ? 1 : 0.03;
+      }).attr("stroke-width", l => {
+        const sid = typeof l.source === "string" ? l.source : (l.source as any).id;
+        const tid = typeof l.target === "string" ? l.target : (l.target as any).id;
+        return (sid === d.id || tid === d.id) ? 2.5 : 0.8;
+      });
+    }).on("mouseout", function () {
+      tooltip.style("opacity", "0");
+      nodeG.transition().duration(120).style("opacity", 1);
+      link.transition().duration(120).attr("stroke-opacity", l => {
+        const s = nodeLookup.get(typeof l.source === "string" ? l.source : (l.source as any).id)!;
+        const t = nodeLookup.get(typeof l.target === "string" ? l.target : (l.target as any).id)!;
+        const isSecondHop = (s?.hop && s.hop > 1) || (t?.hop && t.hop > 1);
+        return isSecondHop ? baseEdgeOpacity * 0.5 : baseEdgeOpacity;
+      }).attr("stroke-width", 1);
+    }).on("click", (_ev, d) => {
+      if (d.isGroup) { setExpandedFolders(prev => { const n = new Set(prev); if (n.has(d.folder)) n.delete(d.folder); else n.add(d.folder); return n; }); }
+      else { onFileClickRef.current(d.data); if (d.id !== focusedNodeId) { setFocusedNodeId(d.id); setFocusDepth(1); } }
+    });
+
+    svg.transition().duration(300).style("opacity", "1");
+    return () => { simulationRef.current?.stop(); };
+  }, [focusedNodeId, files, edges, focusDepth, focusSearch, expandedFolders]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Escape key to exit focus mode ───────────────────────────────────────────
+  useEffect(() => {
+    if (!focusedNodeId) return;
+    const handler = (ev: KeyboardEvent) => { if (ev.key === "Escape") setFocusedNodeId(null); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [focusedNodeId]);
+
   return (
     <div className="w-full relative flex-1" style={{ height: "100%" }}>
+      {/* ── Focus mode banner ───────────────────────────────────────── */}
+      {focusedNodeId && (
+        <>
+          <div className="absolute top-4 left-4 z-20 flex items-center gap-3">
+            <button
+              onClick={() => setFocusedNodeId(null)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all hover:scale-105"
+              style={{
+                background: "rgba(240,136,62,0.15)",
+                border: "1px solid rgba(240,136,62,0.4)",
+                color: "#f0883e",
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 12H5M12 19l-7-7 7-7" />
+              </svg>
+              Exit Focus
+            </button>
+            <div
+              className="px-3 py-2 rounded-lg text-xs font-medium"
+              style={{
+                background: "rgba(48,54,61,0.5)",
+                border: "1px solid #30363d",
+                color: "#e6edf3",
+                backdropFilter: "blur(8px)",
+              }}
+            >
+              Focusing: <span className="text-[#f0883e] font-bold">{files.find(f => f.id === focusedNodeId)?.label || "File"}</span>
+            </div>
+          </div>
+
+          {/* ── Focus Controls (Right) ────────────────────────────────── */}
+          <div
+            className="absolute z-20 flex flex-col gap-2 p-3 rounded-xl border border-[#30363d] backdrop-blur-md bg-[#0d1117]/80 w-64 shadow-2xl transition-all"
+            style={{
+              top: '20px',
+              right: '20px',
+              borderLeft: "4px solid #f0883e"
+            }}
+          >
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[10px] uppercase tracking-wider text-[#8b949e] font-bold flex items-center gap-1.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-[#f0883e] animate-pulse" />
+                Focus Explorer
+              </span>
+              <button onClick={() => setIsFocusUIOpen(!isFocusUIOpen)} className="text-[#8b949e] hover:text-white text-sm font-bold px-1">
+                {isFocusUIOpen ? '−' : '+'}
+              </button>
+            </div>
+
+            {isFocusUIOpen && (
+              <div className="space-y-3">
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[10px] text-[#8b949e] font-semibold">Graph Depth</label>
+                    <span className="text-[9px] text-[#f0883e] font-bold px-1.5 py-0.5 rounded bg-[#f0883e]/10 border border-[#f0883e]/20">{focusDepth}-Hop</span>
+                  </div>
+                  <div className="flex gap-1 p-0.5 bg-[#161b22] rounded-lg border border-[#30363d]">
+                    <button
+                      onClick={() => setFocusDepth(1)}
+                      className={`flex-1 py-1 text-[10px] rounded-md transition-all ${focusDepth === 1 ? 'bg-[#30363d] text-white shadow-sm font-bold' : 'text-[#8b949e] hover:text-white'}`}
+                    >1-Hop</button>
+                    <button
+                      onClick={() => setFocusDepth(2)}
+                      className={`flex-1 py-1 text-[10px] rounded-md transition-all ${focusDepth === 2 ? 'bg-[#30363d] text-white shadow-sm font-bold' : 'text-[#8b949e] hover:text-white'}`}
+                    >2-Hop</button>
+                    <button
+                      onClick={() => setFocusDepth('all')}
+                      className={`flex-1 py-1 text-[10px] rounded-md transition-all ${focusDepth === 'all' ? 'bg-[#30363d] text-white shadow-sm font-bold' : 'text-[#8b949e] hover:text-white'}`}
+                    >All</button>
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[10px] text-[#8b949e] font-semibold">Filter View</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="Filter files/folders..."
+                      value={focusSearch}
+                      onChange={(e) => setFocusSearch(e.target.value)}
+                      className="w-full bg-[#161b22] border border-[#30363d] rounded-lg pl-2 pr-7 py-1.5 text-[11px] text-[#e6edf3] focus:outline-none focus:border-[#f0883e]/50 transition-all placeholder:text-[#484f58]"
+                    />
+                    {focusSearch && (
+                      <button
+                        onClick={() => setFocusSearch("")}
+                        className="absolute right-2 top-1.5 text-[#8b949e] hover:text-white text-xs"
+                      >×</button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-[#30363d] flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2 text-[10px] text-[#8b949e]">
+                    <span className="w-2 h-2 rounded-full bg-[#30363d] border border-[#484f58] flex items-center justify-center text-[6px]">📁</span>
+                    <span>Click group to expand</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-[10px] text-[#8b949e]">
+                    <span className="w-2 h-2 rounded-full border border-[#f0883e] bg-[#f0883e]/20" />
+                    <span>Sizes by importance</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
       <div className="absolute bottom-4 left-4 z-10 border rounded-xl overflow-hidden flex flex-col pointer-events-auto"
         style={{ background: "rgba(13,17,23,0.92)", borderColor: "#30363d" }}>
-        
-        <button 
+
+        <button
           onClick={() => setIsLegendOpen(!isLegendOpen)}
           className="w-full flex items-center justify-between p-3 hover:bg-[rgba(255,255,255,0.05)] transition-colors gap-6"
         >

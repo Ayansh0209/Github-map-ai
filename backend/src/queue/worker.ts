@@ -168,7 +168,7 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
         const { graphData, fileGraph, functionFiles, searchIndex } = buildGraph({
             owner,
             repo,
-            commitSha:      metadata.commitSha,
+            commitSha: metadata.commitSha,
             fileNodes,
             importEdges,
             allFunctions,
@@ -199,6 +199,19 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             console.warn("[worker] Failed to persist file graph:", (err as Error).message);
         }
 
+        // ── Persist per-file functions to Redis ──────────────────────────────
+        try {
+            let funcCount = 0;
+            for (const [fileId, payload] of functionFiles.entries()) {
+                const funcKey = `functions:${owner}:${repo}:${metadata.commitSha}:${fileId}`;
+                await redisConnection.set(funcKey, JSON.stringify(payload));
+                funcCount++;
+            }
+            console.log(`[worker] persisted ${funcCount} per-file functions to Redis`);
+        } catch (err) {
+            console.warn("[worker] Failed to persist per-file functions:", (err as Error).message);
+        }
+
         const result = {
             success: true,
             owner,
@@ -215,6 +228,16 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
             // Per-file function data — Map converted to plain object for JSON serialization
             _functionFiles: Object.fromEntries(functionFiles),
         };
+
+        const resultJson = JSON.stringify(result)
+        const resultSizeMB = (Buffer.byteLength(resultJson, 'utf8') / 1024 / 1024).toFixed(2)
+        console.log(`[worker] result size: ${resultSizeMB}MB`)
+
+        if (parseFloat(resultSizeMB) > 10) {
+            console.warn(`[worker] WARNING: result is ${resultSizeMB}MB — may exceed limits`)
+            console.warn(`[worker] _inlineFileGraph files: ${result._inlineFileGraph?.files?.length}`)
+            console.warn(`[worker] _functionFiles keys: ${Object.keys(result._functionFiles ?? {}).length}`)
+        }
 
         // ── Cache the result so same SHA is never reprocessed ─────────────────
         await setCachedResult(cacheKey, result);

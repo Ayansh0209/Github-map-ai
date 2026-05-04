@@ -26,7 +26,7 @@ export type {
   AffectedFunction,
 } from "./types";
 
-import type { AnalyzeResponse, StatusResponse, SearchResponse, IssueMappingResult, IssueMapRequest, IssueMapResult } from "./types";
+import type { AnalyzeResponse, StatusResponse, SearchResponse, IssueMappingResult, IssueMapRequest, IssueMapResult, FunctionFilePayload } from "./types";
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -63,7 +63,20 @@ export async function getJobStatus(jobId: string): Promise<StatusResponse> {
     throw new Error(err.error || `HTTP ${res.status}`);
   }
 
-  return res.json();
+  console.log('[poll] response size:', res.headers.get('content-length'), 'bytes');
+  console.log('[poll] status:', res.status);
+
+  try {
+    const data = await res.json();
+    console.log('[poll] parsed result keys:', Object.keys(data));
+    console.log('[poll] _inlineFileGraph files:', data._inlineFileGraph?.files?.length);
+    console.log('[poll] _functionFiles keys:', Object.keys(data._functionFiles ?? {}).length);
+    return data;
+  } catch (err) {
+    console.error('[poll] JSON parse failed:', err);
+    console.error('[poll] This usually means the response is too large');
+    throw err;
+  }
 }
 
 export async function searchCode(
@@ -142,6 +155,22 @@ export async function fetchFileContent(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Failed to fetch file content" }));
     throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+export async function fetchFileFunctions(
+  owner: string,
+  repo: string,
+  commitSha: string,
+  filePath: string
+): Promise<FunctionFilePayload> {
+  const res = await fetch(`${API_BASE}/functions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ owner, repo, commitSha, fileId: filePath }),
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
   }
   return res.json();
 }

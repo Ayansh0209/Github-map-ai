@@ -123,6 +123,8 @@ export interface StatusResponse {
   commitSha?: string;
   defaultBranch?: string;
   stats?: GraphStats;
+  fileGraphUrl?: string | null;
+  functionsBaseUrl?: string | null;
   _inlineFileGraph?: FileGraphPayload;
   _functionFiles?: Record<string, FunctionFilePayload>;
 }
