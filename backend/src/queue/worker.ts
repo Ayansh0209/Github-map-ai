@@ -13,6 +13,7 @@ import {
 import { decideParsing } from "../processing/parseDecider";
 import { processAllFiles } from "../parser/chunkProcessor";
 import { buildGraph } from "../parser/builder";
+import { buildRetrievalIndex } from "../parser/retrievalBuilder";
 import path from "path";
 import os from "os";
 type AnalyzeJobData = {
@@ -178,6 +179,31 @@ async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
         });
 
         await updateProgress(job, 90, "graph built");
+
+        // ── Build and store retrieval index ───────────────────────────────────────────────
+        // Independent of the visualization graph — built from the same data.
+        // Failure is non-fatal: warn and continue. The graph is the primary output.
+        try {
+            const retrievalIndex = buildRetrievalIndex(
+                owner,
+                repo,
+                metadata.commitSha,
+                fileNodes,
+                importEdges,
+                allFunctions,
+            );
+            const retrievalKey = `retrieval:${owner}:${repo}`;
+            await redisConnection.set(retrievalKey, JSON.stringify(retrievalIndex));
+            console.log(
+                `[worker] retrieval index stored in Redis ` +
+                `(${retrievalIndex.files.length} files, key: ${retrievalKey})`
+            );
+        } catch (err) {
+            console.warn(
+                "[worker] Failed to build or store retrieval index (non-fatal):",
+                (err as Error).message
+            );
+        }
 
         // ── Persist search index to Redis for instant retrieval ───────────────
         if (searchIndex) {

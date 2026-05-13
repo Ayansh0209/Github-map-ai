@@ -1,26 +1,50 @@
 // src/routes/issueMap.ts
 // ─────────────────────────────────────────────────────────────────────────────
-// Issue mapping routes — thin request/response wiring only.
-// No business logic. No AI calls. No prompt building.
+// Issue mapping routes — thin request/response wiring ONLY.
 //
-// Routes:
-//   POST /issue-map/fetch-issues  — get open issues list for a repo
-//   POST /issue-map/map           — map a single issue to affected files
-//   POST /issue-map/suggest-fix   — 501 stub (Phase 2)
+// WHAT THIS FILE DOES:
+//   - Validate incoming requests (Zod schemas)
+//   - Check and write the Redis result cache
+//   - Fetch raw GitHub data (issue, comments, linked PRs)
+//   - Delegate all business logic to issuePipeline.runIssueMappingPipeline()
+//   - Build and return the response in the shape the frontend expects
+//
+// WHAT THIS FILE INTENTIONALLY DOES NOT DO:
+//   - No deterministic keyword matching (lives in issueMapper.ts)
+//   - No AI prompt building (lives in issueAnalyzer.ts)
+//   - No graph traversal (lives in issueMapper.ts)
+//   - No snippet fetching (lives in snippetFetcher.ts)
+//   - No merging of results from different sources (lives in issuePipeline.ts)
+//   - No inline search index building (lives in issueMapper.ts)
+//
+// GRACEFUL DEGRADATION (enforced at this layer):
+//   - Redis down → skip cache, run pipeline, return result without caching
+//   - GitHub issue 404 → return 404 to client (correct behavior, not degradation)
+//   - GitHub comments/PRs fail → pass empty arrays to pipeline (pipeline handles)
+//   - Pipeline throws → return empty result with source="deterministic", never 500
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { redisConnection } from "../queue/jobQueue";
-import { fetchIssue, fetchOpenIssues, fetchIssueComments, fetchLinkedPRs, fetchRawFile } from "../github/issueClient";
-import { mapIssueToCode, buildInlineSearchIndex } from "../parser/issueMapper";
-import { callGeminiForMapping, smartTruncate, callGeminiForChatStream } from "../parser/issueAnalyzer";
+import {
+    fetchIssue,
+    fetchOpenIssues,
+    fetchIssueComments,
+    fetchLinkedPRs,
+    fetchRawFile,
+} from "../github/issueClient";
+import { smartTruncate, callGeminiForChatStream } from "../parser/issueAnalyzer";
 import type { AffectedFile } from "../parser/issueAnalyzer";
-import { config } from "../config/config";
+import {
+    runIssueMappingPipeline,
+    type PipelineInput,
+} from "../parser/issuePipeline";
 
 const router = Router();
 
 // ── Zod schemas ───────────────────────────────────────────────────────────────
+// These are kept exactly as-is — the frontend depends on these shapes.
 
 const FetchIssuesRequestSchema = z.object({
     owner: z.string().min(1).max(100),
@@ -34,15 +58,15 @@ const IssueMapRequestSchema = z.object({
     issueNumber: z.number().int().positive(),
     graphData: z.object({
         files: z.array(z.object({
-            id:                     z.string(),
-            label:                  z.string(),
+            id:                      z.string(),
+            label:                   z.string(),
             architecturalImportance: z.number().optional().default(0),
-        })).max(3000), // Increased for large repos
+        })).max(3000),
         functions: z.array(z.object({
             id:       z.string(),
             name:     z.string(),
             filePath: z.string(),
-        })).max(5000).optional().default([]), // Increased
+        })).max(5000).optional().default([]),
     }).optional(),
 });
 
@@ -68,8 +92,8 @@ const ChatRequestSchema = z.object({
     })).min(1).max(20),
 });
 
-
 // ── Response types ────────────────────────────────────────────────────────────
+// These shapes are consumed by the frontend — do not change field names or remove fields.
 
 interface AffectedFunction {
     functionId: string;
@@ -79,33 +103,39 @@ interface AffectedFunction {
 }
 
 interface IssueMapResponse {
-    issueNumber:      number;
-    issueTitle:       string;
-    issueBody:        string;
-    issueUrl:         string;
-    affectedFiles:    AffectedFile[];
+    issueNumber:       number;
+    issueTitle:        string;
+    issueBody:         string;
+    issueUrl:          string;
+    affectedFiles:     AffectedFile[];
     affectedFunctions: AffectedFunction[];
-    source:           "cache" | "deterministic" | "ai";
+    source:            "cache" | "deterministic" | "ai";
     overallConfidence: number;
-    summary?:         string;
+    summary?:          string;
 }
 
 // ── POST /issue-map/fetch-issues ──────────────────────────────────────────────
+// Unchanged from Phase 1 — returns open issues list with 5-minute cache.
 
 router.post("/fetch-issues", async (req: Request, res: Response, next: NextFunction) => {
     try {
         const { owner, repo } = FetchIssuesRequestSchema.parse(req.body);
 
-        // Check Redis cache (5 min TTL — issues change)
         const cacheKey = `issues-list:${owner}:${repo}`;
-        const cached = await redisConnection.get(cacheKey);
+
+        // Graceful Redis failure: if get() throws, treat as cache miss
+        let cached: string | null = null;
+        try {
+            cached = await redisConnection.get(cacheKey);
+        } catch {
+            // Redis unavailable — skip cache, fetch fresh
+        }
+
         if (cached) {
             return res.json({ source: "cache", issues: JSON.parse(cached) });
         }
 
         const issues = await fetchOpenIssues(owner, repo, 100);
-
-        // Return issue summaries only (no body content in list view)
         const summaries = issues.map(issue => ({
             number:  issue.number,
             title:   issue.title,
@@ -114,7 +144,12 @@ router.post("/fetch-issues", async (req: Request, res: Response, next: NextFunct
             state:   issue.state,
         }));
 
-        await redisConnection.set(cacheKey, JSON.stringify(summaries), "EX", 300); // 5 min TTL
+        // Cache write failure is never fatal
+        try {
+            await redisConnection.set(cacheKey, JSON.stringify(summaries), "EX", 300);
+        } catch {
+            // Redis down — continue without caching
+        }
 
         return res.json({ source: "fresh", issues: summaries });
     } catch (err) {
@@ -126,21 +161,43 @@ router.post("/fetch-issues", async (req: Request, res: Response, next: NextFunct
 });
 
 // ── POST /issue-map/map ────────────────────────────────────────────────────────
+//
+// Thin orchestration: validate → cache check → GitHub fetch → pipeline → cache write → respond.
+//
+// All business logic (deterministic matching, graph traversal, snippet fetching,
+// AI reasoning, result merging) lives in runIssueMappingPipeline().
+//
+// FALLBACK CHAIN (documented for future maintainers):
+//   1. Redis cache hit → return immediately, no pipeline run
+//   2. Redis down → skip cache check, run pipeline anyway
+//   3. RetrievalIndex in Redis → new pipeline (graph traversal + snippets + Gemini)
+//   4. RetrievalIndex missing → legacy pipeline (inline index + Gemini with no snippets)
+//   5. Gemini fails in pipeline → pipeline returns geminiResult=null
+//   6. geminiResult=null → response has empty affectedFiles, source="deterministic"
+//   7. Pipeline throws → same as step 6, log error, never 500
 
 router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
     try {
-        // Step 1 — Validate
+        // ── Step 1: Validate ──────────────────────────────────────────────────
         const { owner, repo, commitSha, issueNumber, graphData } = IssueMapRequestSchema.parse(req.body);
 
-        // Step 2 — Redis cache check (no TTL — same issue + SHA = same result forever)
+        // ── Step 2: Redis cache check ─────────────────────────────────────────
+        // Cache key: (owner, repo, issueNumber, commitSha)
+        // No TTL — same SHA means same code means same result, forever.
+        // Degradation: Redis down → treat as cache miss, run pipeline.
         const cacheKey = `issue-map:${owner}:${repo}:${issueNumber}:${commitSha}`;
-        const cached = await redisConnection.get(cacheKey);
-        if (cached) {
-            const result = JSON.parse(cached) as IssueMapResponse;
-            return res.json({ ...result, source: "cache" });
+        try {
+            const cached = await redisConnection.get(cacheKey);
+            if (cached) {
+                const result = JSON.parse(cached) as IssueMapResponse;
+                return res.json({ ...result, source: "cache" });
+            }
+        } catch {
+            console.warn("[issueMap] Redis unavailable for cache check — running pipeline");
         }
 
-        // Step 3 — Fetch issue + comments from GitHub
+        // ── Step 3: Fetch issue from GitHub ───────────────────────────────────
+        // Issue 404 → return 404 to client (correct behavior, not degradation).
         let issue;
         try {
             issue = await fetchIssue(owner, repo, issueNumber);
@@ -154,135 +211,118 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
             throw err;
         }
 
-        const comments = await fetchIssueComments(owner, repo, issueNumber, 20).catch(() => []);
-        const linkedPRs = await fetchLinkedPRs(owner, repo, issueNumber);
+        // Comments and linked PRs: failures are non-fatal — pass empty arrays.
+        const comments  = await fetchIssueComments(owner, repo, issueNumber, 20).catch(() => []);
+        const linkedPRs = await fetchLinkedPRs(owner, repo, issueNumber).catch(() => []);
 
-        console.log(`[issueMap] Fetched issue #${issueNumber}: ${issue.title} (${comments.length} comments)`);
+        console.log(
+            `[issueMap] fetched issue #${issueNumber}: "${issue.title}" ` +
+            `(${comments.length} comments, ${linkedPRs.length} linked PRs)`
+        );
 
-        // Step 3.5 — Ensure we have graph data (fetch from Redis if not in request)
-        let finalGraphData = graphData;
-        if (!finalGraphData) {
-            const graphKey = `graph:${owner}:${repo}`;
-            const cachedGraph = await redisConnection.get(graphKey);
-            if (cachedGraph) {
-                const parsed = JSON.parse(cachedGraph);
-                finalGraphData = {
-                    files: (parsed.files || []).map((f: any) => ({
-                        id: f.id,
-                        label: f.label,
-                        architecturalImportance: f.architecturalImportance || 0
-                    })),
-                    functions: [] // Functions can be fetched per-file if needed later
-                };
-                console.log(`[issueMap] Graph data recovered from Redis (${finalGraphData.files.length} files)`);
+        // ── Step 3.5: Resolve graph data ──────────────────────────────────────
+        // graphData comes from the request body (frontend sends it inline),
+        // OR from Redis (when the frontend doesn't include it).
+        // Degradation: if neither available, return 400 — cannot map without file list.
+        let resolvedGraphData = graphData;
+        if (!resolvedGraphData) {
+            try {
+                const cachedGraph = await redisConnection.get(`graph:${owner}:${repo}`);
+                if (cachedGraph) {
+                    const parsed = JSON.parse(cachedGraph);
+                    resolvedGraphData = {
+                        files: (parsed.files ?? []).map((f: any) => ({
+                            id:                      f.id as string,
+                            label:                   f.label as string,
+                            architecturalImportance: (f.architecturalImportance ?? 0) as number,
+                        })),
+                        functions: [],
+                    };
+                    console.log(
+                        `[issueMap] graph data recovered from Redis (${resolvedGraphData.files.length} files)`
+                    );
+                }
+            } catch {
+                // Redis down — resolvedGraphData stays null
             }
         }
 
-        if (!finalGraphData || !finalGraphData.files.length) {
-            return res.status(400).json({ error: "Graph data missing and not found in cache. Please re-analyze the repo." });
-        }
-        // Sort files by architectural importance (descending), cap at 200
-        const sortedFiles = [...finalGraphData.files]
-            .sort((a, b) => (b.architecturalImportance ?? 0) - (a.architecturalImportance ?? 0))
-            .slice(0, 300); // Increased slice limit for large repos
-
-        const inlineIndex = buildInlineSearchIndex(sortedFiles);
-
-        const query = `${issue.title} ${issue.body.slice(0, 500)}`;
-        const deterministicResult = mapIssueToCode(query, inlineIndex, 10);
-
-        const deterministicFiles: AffectedFile[] = deterministicResult.topFiles.map(f => ({
-            fileId:     f.filePath,
-            confidence: f.score,
-            reason:     f.matchedReasons[0] ?? "Keyword match",
-        }));
-
-        const deterministicFunctions: AffectedFunction[] = deterministicResult.topFunctions.map(fn => ({
-            functionId: fn.functionId,
-            filePath:   fn.filePath,
-            confidence: fn.score,
-            reason:     fn.matchedReasons[0] ?? "Keyword match",
-        }));
-
-        const deterministicConfidence = deterministicResult.confidenceScore;
-
-        console.log(`[issueMap] Deterministic matching finished. Found ${deterministicFiles.length} files. Max confidence: ${deterministicConfidence}`);
-        if (deterministicFiles.length > 0) {
-            console.log(`[issueMap] Top deterministic file: ${deterministicFiles[0].fileId} (${deterministicFiles[0].confidence}%)`);
+        if (!resolvedGraphData?.files.length) {
+            return res.status(400).json({
+                error: "Graph data missing and not found in cache. Please re-analyze the repo.",
+            });
         }
 
-        // Step 5 -- PR-based files (most reliable), then AI fallback
-        let affectedFiles: AffectedFile[] = deterministicFiles;
-        let affectedFunctions = deterministicFunctions;
-        let source: IssueMapResponse["source"] = "deterministic";
+        // ── Step 4: Run the pipeline ──────────────────────────────────────────
+        // issuePipeline owns all business logic from here.
+        // The route only provides: what files exist, what the issue is.
+        const graphFileIds = new Set(resolvedGraphData.files.map(f => f.id));
+
+        const pipelineInput: PipelineInput = {
+            owner,
+            repo,
+            commitSha,
+            issue: {
+                title:      issue.title,
+                body:       issue.body,
+                comments,
+                linkedPRs,
+            },
+            linkedPRs,
+            graphFileIds,
+            legacyFiles: resolvedGraphData.files,
+        };
+
+        let pipelineResult;
+        try {
+            pipelineResult = await runIssueMappingPipeline(pipelineInput);
+        } catch (err) {
+            // Pipeline threw unexpectedly — return graceful empty result, not 500.
+            console.error("[issueMap] pipeline threw unexpectedly:", (err as Error).message);
+            pipelineResult = {
+                geminiResult:    null,
+                usedNewPipeline: false,
+                snippetCount:    0,
+                isVague:         false,
+                intent:          null,
+                fallbackFiles:   [],
+            };
+        }
+
+        // ── Step 5: Build response ────────────────────────────────────────────
+        // Translate PipelineResult → IssueMapResponse (the frontend contract).
+        const { geminiResult, usedNewPipeline, snippetCount, fallbackFiles } = pipelineResult;
+
+        let affectedFiles: AffectedFile[]         = [];
+        const affectedFunctions: AffectedFunction[] = []; // populated by future suggest-fix
+        let source: IssueMapResponse["source"]    = "deterministic";
         let summary: string | undefined;
 
-        // Build PR-based file list from linked PRs
-        const graphFileIds = new Set(sortedFiles.map(f => f.id));
-        const prBasedFiles: AffectedFile[] = [];
-        for (const pr of linkedPRs) {
-            for (const changedFile of pr.changedFiles) {
-                if (graphFileIds.has(changedFile) && !prBasedFiles.some(f => f.fileId === changedFile)) {
-                    prBasedFiles.push({
-                        fileId: changedFile,
-                        confidence: pr.merged ? 95 : 80,
-                        reason: `Changed in PR #${pr.number}: ${pr.title}`,
-                    });
-                }
-            }
-        }
-
-        console.log(`[issueMap] Linked PRs: ${linkedPRs.length}. PR-based files: ${prBasedFiles.length}. Deterministic confidence: ${deterministicConfidence}. API Key present: ${!!config.gemini.apiKey}`);
-
-        if (prBasedFiles.length > 0) {
-            console.log(`[issueMap] PR data found -- ${prBasedFiles.length} files from linked PRs`);
-            affectedFiles = [...prBasedFiles];
-            const prFileIds = new Set(prBasedFiles.map(f => f.fileId));
-            for (const df of deterministicFiles) {
-                if (!prFileIds.has(df.fileId)) affectedFiles.push(df);
-            }
-            source = "deterministic";
+        if (geminiResult && geminiResult.affectedFiles.length > 0) {
+            affectedFiles = geminiResult.affectedFiles;
+            source        = "ai";
+            summary       = geminiResult.summary;
+            console.log(
+                `[issueMap] mapping succeeded — ${affectedFiles.length} files, ` +
+                `${snippetCount} snippets, new_pipeline=${usedNewPipeline}`
+            );
         } else {
-            if (config.gemini.apiKey) {
-                const issueContextInput = { title: issue.title, body: issue.body, comments, linkedPRs };
-                const keywordHints = deterministicFiles.map(f => f.fileId);
-
-                const geminiResult = await callGeminiForMapping(
-                    issueContextInput,
-                    sortedFiles,
-                    keywordHints
-                );
-
-                if (geminiResult && geminiResult.affectedFiles.length > 0) {
-                    const aiFileIds = new Set(geminiResult.affectedFiles.map(f => f.fileId));
-                    affectedFiles = [...geminiResult.affectedFiles];
-                    for (const df of deterministicFiles) {
-                        if (!aiFileIds.has(df.fileId)) affectedFiles.push(df);
-                    }
-                    source = "ai";
-                    summary = geminiResult.summary;
-                    console.log(`[issueMap] Gemini mapping succeeded. Found ${geminiResult.affectedFiles.length} files. Summary: ${(summary ?? "").slice(0, 100)}...`);
-                } else {
-                    console.log(`[issueMap] Gemini returned no files. Falling back to deterministic results.`);
-                    affectedFiles = deterministicFiles;
-                }
-            } else {
-                console.log(`[issueMap] No Gemini key -- deterministic only`);
-                affectedFiles = deterministicFiles;
-            }
+            affectedFiles = [];
+            console.log(
+                `\x1b[31m[issueMap] pipeline returned no AI result — 0 files found. ` +
+                `new_pipeline=${usedNewPipeline}, snippets=${snippetCount}\x1b[0m`
+            );
         }
 
-        // Overall confidence
         const overallConfidence = affectedFiles.length > 0
             ? Math.max(...affectedFiles.map(f => f.confidence))
-            : deterministicConfidence;
+            : 0;
 
-        // Step 6 -- Cache forever (no TTL)
         const response: IssueMapResponse = {
             issueNumber,
-            issueTitle:   issue.title,
-            issueBody:    issue.body,
-            issueUrl:     issue.htmlUrl,
+            issueTitle:        issue.title,
+            issueBody:         issue.body,
+            issueUrl:          issue.htmlUrl,
             affectedFiles,
             affectedFunctions,
             source,
@@ -290,7 +330,16 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
             summary,
         };
 
-        await redisConnection.set(cacheKey, JSON.stringify(response));
+        // ── Step 6: Cache result ──────────────────────────────────────────────
+        // Only cache when we have a useful result.
+        // Cache failure is never fatal.
+        if (affectedFiles.length > 0) {
+            try {
+                await redisConnection.set(cacheKey, JSON.stringify(response));
+            } catch {
+                console.warn("[issueMap] failed to write result to cache (Redis down)");
+            }
+        }
 
         return res.json(response);
     } catch (err) {
@@ -301,20 +350,10 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
     }
 });
 
-// Phase 2 implementation will:
-// 1. Fetch primary fileId content from GitHub raw API
-// 2. Fetch connectedFileIds content from GitHub raw API (max 10 files)
-// 3. Truncate each file: first 150 lines + last 30 lines if > 200 lines
-// 4. Call callGeminiForFix() from issueAnalyzer.ts with:
-//    { issue, primaryFile: {id, content}, connectedFiles: [{id, content}] }
-// 5. Return replacement blocks
-// Cost estimate: ~$0.01-0.05 per fix depending on file sizes
-// Cache key: fix:{owner}:{repo}:{issueNumber}:{fileId}:{commitSha}
-
-// ── POST /issue-map/suggest-fix (501 stub — Phase 2) ─────────────────────────
+// ── POST /issue-map/suggest-fix (501 stub) ────────────────────────────────────
+// Not implemented — stub kept so the frontend can show a "coming soon" state.
 
 router.post("/suggest-fix", async (req: Request, res: Response) => {
-    // Validate the body so the client knows the schema is correct
     const result = SuggestFixRequestSchema.safeParse(req.body);
     if (!result.success) {
         return res.status(400).json({ error: "Invalid request", details: result.error.issues });
@@ -322,61 +361,80 @@ router.post("/suggest-fix", async (req: Request, res: Response) => {
     return res.status(501).json({ error: "Fix suggestions coming soon" });
 });
 
-
 // ── POST /issue-map/chat ──────────────────────────────────────────────────────
+// Unchanged — this route has its own separate context pipeline that fetches
+// raw file content and builds a system prompt for an interactive chat session.
+// It does NOT use the issue mapping pipeline.
 
 router.post("/chat", async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { owner, repo, commitSha, issueNumber, fileId, connectedFileIds, messages } = ChatRequestSchema.parse(req.body);
+        const {
+            owner, repo, commitSha, issueNumber, fileId,
+            connectedFileIds, messages,
+        } = ChatRequestSchema.parse(req.body);
 
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
 
-        const cacheKey = `issue-chat-ctx:${owner}:${repo}:${issueNumber || "no-issue"}:${fileId}:${commitSha}`;
-        let systemContext = await redisConnection.get(cacheKey);
+        const cacheKey = `issue-chat-ctx:${owner}:${repo}:${issueNumber ?? "no-issue"}:${fileId}:${commitSha}`;
+
+        let systemContext: string | null = null;
+        try {
+            systemContext = await redisConnection.get(cacheKey);
+        } catch {
+            // Redis down — build context fresh
+        }
 
         if (!systemContext) {
             let issueData: any = null;
-            let prData: any[] = [];
+            let prData: any[]  = [];
             let primaryFileContent = "";
 
             if (issueNumber) {
-                const [issue, comments, linkedPRs, content] = await Promise.all([
+                const [fetchedIssue, comments, linkedPRs, content] = await Promise.all([
                     fetchIssue(owner, repo, issueNumber),
                     fetchIssueComments(owner, repo, issueNumber, 5),
                     fetchLinkedPRs(owner, repo, issueNumber),
-                    fetchRawFile(owner, repo, commitSha, fileId)
+                    fetchRawFile(owner, repo, commitSha, fileId),
                 ]);
-                issueData = issue;
-                prData = linkedPRs;
+                issueData          = fetchedIssue;
+                prData             = linkedPRs;
                 primaryFileContent = content;
             } else {
                 primaryFileContent = await fetchRawFile(owner, repo, commitSha, fileId);
             }
 
             const connectedContents = await Promise.all(
-                connectedFileIds.map((id: string) => fetchRawFile(owner, repo, commitSha, id).then((content: string) => ({ id, content })))
+                connectedFileIds.map((id: string) =>
+                    fetchRawFile(owner, repo, commitSha, id)
+                        .then((content: string) => ({ id, content }))
+                )
             );
 
-            const issueTerms = issueData 
-                ? [...new Set((issueData.title + " " + issueData.body).match(/\b([a-z][a-zA-Z0-9_]{2,}|[A-Z][a-zA-Z0-9_]{2,})\b/g) || [])]
+            const issueTerms = issueData
+                ? [...new Set(
+                    (issueData.title + " " + issueData.body)
+                        .match(/\b([a-z][a-zA-Z0-9_]{2,}|[A-Z][a-zA-Z0-9_]{2,})\b/g) ?? []
+                  )]
                 : [];
-                
+
             const primaryTruncated = smartTruncate(primaryFileContent, issueTerms, 300);
-            
-            const connectedParts = connectedContents
+            const connectedParts   = connectedContents
                 .filter((c: any) => c.content)
                 .map((c: any) => `-- ${c.id} --\n${smartTruncate(c.content, issueTerms, 80)}`)
                 .join("\n\n");
- 
-            const prLines = prData.map((pr: any) => 
-                `  PR #${pr.number} [${pr.merged ? 'MERGED' : pr.state.toUpperCase()}]: ${pr.title}\n  Changed files: ${pr.changedFiles.slice(0, 10).join(', ')}`
+
+            const prLines = prData.map((pr: any) =>
+                `  PR #${pr.number} [${pr.merged ? "MERGED" : pr.state.toUpperCase()}]: ${pr.title}\n` +
+                `  Changed files: ${pr.changedFiles.slice(0, 10).join(", ")}`
             ).join("\n");
- 
+
             systemContext = [
                 `REPOSITORY: ${owner}/${repo}`,
-                issueData ? `ISSUE #${issueNumber}: ${issueData.title}` : "NO SPECIFIC ISSUE SELECTED",
+                issueData
+                    ? `ISSUE #${issueNumber}: ${issueData.title}`
+                    : "NO SPECIFIC ISSUE SELECTED",
                 "",
                 "ISSUE DESCRIPTION:",
                 issueData ? issueData.body.slice(0, 600) : "N/A",
@@ -387,19 +445,23 @@ router.post("/chat", async (req: Request, res: Response, next: NextFunction) => 
                 `PRIMARY FILE: ${fileId}`,
                 primaryTruncated,
                 "",
-                connectedParts ? `CONNECTED FILES:\n${connectedParts}` : ""
+                connectedParts ? `CONNECTED FILES:\n${connectedParts}` : "",
             ].join("\n");
 
-            await redisConnection.set(cacheKey, systemContext);
+            try {
+                await redisConnection.set(cacheKey, systemContext);
+            } catch {
+                // Redis down — context will be rebuilt on next request
+            }
         }
 
         const result = await callGeminiForChatStream(systemContext, messages);
-        
+
         for await (const chunk of result.stream) {
             const text = chunk.text();
             res.write(`data: ${JSON.stringify(text)}\n\n`);
         }
-        
+
         res.write("data: [DONE]\n\n");
         res.end();
     } catch (err) {

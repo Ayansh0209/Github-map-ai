@@ -70,6 +70,104 @@ function extractCallNames(node: Node): string[] {
     return [...calls];
 }
 
+// ── Retrieval signal detectors ───────────────────────────────────────────────
+// These run on the source text of each function body — no extra AST traversal.
+// We call node.getText() which ts-morph provides cheaply from its internal cache.
+
+/**
+ * Detect if a function contains authorization or permission-checking logic.
+ *
+ * Rationale for each pattern:
+ *   - checkAuth / requireAuth / verifyAuth / isAuthenticated: common auth utility names
+ *   - hasPermission / checkPermission / canAccess / isAuthorized: role/permission check calls
+ *   - context.user / ctx.user / req.user: reading user from request/context (access control)
+ *   - creatorId / userId comparisons or ownership checks (common in GraphQL resolvers)
+ *   - throw.*Unauthorized / throw.*Forbidden / throw.*AuthError: throwing auth errors
+ *   - roles.includes / user.role / userRole: role-based access control patterns
+ *   - session.userId / session.user: session-based auth checks
+ *
+ * We use a regex on the full source text (case-insensitive) rather than
+ * individual call expressions to catch both call-based and throw-based patterns
+ * without a second traversal pass.
+ *
+ * Avoiding false positives:
+ *   - We do NOT flag mere imports of auth utilities (those live in the import
+ *     declarations, not the function body text)
+ *   - Minimum 2-char method names keep us from matching on 'auth' in variable names
+ */
+const AUTH_PATTERNS = [
+    // Auth check function calls
+    /\b(checkAuth|requireAuth|verifyAuth|ensureAuth|authenticate|isAuthenticated)\s*\(/i,
+    // Permission/role check calls
+    /\b(hasPermission|checkPermission|canAccess|isAuthorized|requireRole|checkRole)\s*\(/i,
+    // User from context/request — reading it means the function cares about identity
+    /\b(context|ctx|req)\.(user|currentUser|loggedInUser|viewer)\b/i,
+    // Ownership checks: creatorId, userId comparisons
+    /\b(creatorId|ownerId|userId)\s*[!=]==/,
+    // Throwing auth errors — the function is a gatekeeper
+    /throw\s+new\s+\w*(Unauthorized|Forbidden|AuthorizationError|AccessDenied|AuthError)/i,
+    // Role-based checks
+    /\b(roles?)\.includes\s*\(/i,
+    /\buser\.(role|roles|permissions)\b/i,
+    // Session-based auth
+    /\bsession\.(userId|user|isAuthenticated)\b/i,
+    // JWT decode/verify calls inside the function body
+    /\b(jwt\.verify|verifyToken|decodeToken)\s*\(/i,
+];
+
+function detectAuthCheck(sourceText: string): boolean {
+    return AUTH_PATTERNS.some(pattern => pattern.test(sourceText));
+}
+
+/**
+ * Detect if a function contains database operations.
+ *
+ * Rationale for each pattern:
+ *   Prisma:    prisma.model.findUnique/findFirst/findMany/create/update/delete/upsert
+ *   Mongoose:  Model.find/findOne/findById/save/create/update/deleteOne
+ *   TypeORM:   repository.find/findOne/save/delete/update, getRepository(), createQueryBuilder()
+ *   Sequelize: Model.findOne/findAll/create/update/destroy
+ *   Raw SQL:   db.query(), pool.query(), client.query(), knex()
+ *   Drizzle:   db.select()/insert()/update()/delete() — common in modern TS backends
+ *
+ * We look for the method call name patterns rather than the object name
+ * so we catch any ORM's syntax. This means we check for .findOne( / .findMany(
+ * regardless of whether the receiver is called 'prisma', 'User', or 'repo'.
+ *
+ * Avoiding false positives:
+ *   - Array methods like Array.find / Array.findIndex are excluded by requiring
+ *     the 'One'/'Many'/'First'/'All' suffix or checking for DB-specific names.
+ *   - We use word boundaries and require parentheses to confirm it's a call.
+ */
+const DB_PATTERNS = [
+    // findOne / findMany / findFirst / findAll / findById / findUnique
+    /\.find(One|Many|First|All|ById|Unique|AndCount)?\s*\(/i,
+    // create / createMany / createQueryBuilder
+    /\.(create|createMany|createQueryBuilder)\s*\(/i,
+    // save / saveAll
+    /\.(save|saveAll)\s*\(/i,
+    // update / updateOne / updateMany / upsert
+    /\.(update|updateOne|updateMany|upsert)\s*\(/i,
+    // delete / deleteOne / deleteMany / destroy / remove
+    /\.(delete|deleteOne|deleteMany|destroy|remove)\s*\(/i,
+    // insert / insertMany / insertOne
+    /\.(insert|insertMany|insertOne)\s*\(/i,
+    // aggregate / count / exists
+    /\.(aggregate|count|exists|sum|avg|max|min)\s*\(/i,
+    // Raw SQL: db.query, pool.query, client.query, connection.query
+    /\b(db|pool|client|connection|knex|sql)\.query\s*\(/i,
+    // Drizzle ORM: db.select(), db.insert(), db.update(), db.delete()
+    /\bdb\.(select|insert|update|delete)\s*\(/i,
+    // getRepository() or getManager() — TypeORM
+    /\b(getRepository|getManager|getConnection)\s*\(/i,
+    // Prisma-specific: .$transaction, .$queryRaw, .$executeRaw
+    /\.\$(transaction|queryRaw|executeRaw|connect|disconnect)\s*\(/i,
+];
+
+function detectDatabaseCall(sourceText: string): boolean {
+    return DB_PATTERNS.some(pattern => pattern.test(sourceText));
+}
+
 // ── Function extractors ──────────────────────────────────────────────────────
 
 function determineFunctionKind(
@@ -158,6 +256,7 @@ function extractFromFunctionDeclaration(
     const name = node.getName();
     if (!name) return null; // anonymous function declaration — skip
 
+    const sourceText = node.getText();
     return {
         id: makeFunctionId(relativePath, name),
         name,
@@ -170,6 +269,8 @@ function extractFromFunctionDeclaration(
         calls: extractCallNames(node),
         calledBy: [],
         analysisConfidence: "high",
+        hasAuthCheck: detectAuthCheck(sourceText),
+        hasDatabaseCall: detectDatabaseCall(sourceText),
     };
 }
 
@@ -266,6 +367,7 @@ function extractFromArrowOrExpression(
 
     if (!name) return null; // truly anonymous — skip
 
+    const sourceText = node.getText();
     return {
         id: makeFunctionId(relativePath, name),
         name,
@@ -278,6 +380,8 @@ function extractFromArrowOrExpression(
         calls: extractCallNames(node),
         calledBy: [],
         analysisConfidence: "high",
+        hasAuthCheck: detectAuthCheck(sourceText),
+        hasDatabaseCall: detectDatabaseCall(sourceText),
     };
 }
 
@@ -299,6 +403,7 @@ function extractFromMethod(
     const className = classDecl?.getName();
     const fullName = className ? `${className}.${name}` : name;
 
+    const sourceText = node.getText();
     return {
         id: makeFunctionId(relativePath, fullName),
         name: fullName,
@@ -313,6 +418,8 @@ function extractFromMethod(
         calls: extractCallNames(node),
         calledBy: [],
         analysisConfidence: "high",
+        hasAuthCheck: detectAuthCheck(sourceText),
+        hasDatabaseCall: detectDatabaseCall(sourceText),
     };
 }
 
@@ -333,6 +440,7 @@ function extractFromAccessor(
         exported = isExported(classDecl);
     }
 
+    const sourceText = node.getText();
     return {
         id: makeFunctionId(relativePath, fullName),
         name: fullName,
@@ -345,6 +453,8 @@ function extractFromAccessor(
         calls: extractCallNames(node),
         calledBy: [],
         analysisConfidence: "high",
+        hasAuthCheck: detectAuthCheck(sourceText),
+        hasDatabaseCall: detectDatabaseCall(sourceText),
     };
 }
 
@@ -367,6 +477,7 @@ function extractFromConstructor(
         else if ((node as any).hasModifier(SyntaxKind.ProtectedKeyword)) vis = "protected";
     }
 
+    const sourceText = node.getText();
     return {
         id: makeFunctionId(relativePath, name),
         name,
@@ -380,6 +491,8 @@ function extractFromConstructor(
         calls: extractCallNames(node),
         calledBy: [],
         analysisConfidence: "high",
+        hasAuthCheck: detectAuthCheck(sourceText),
+        hasDatabaseCall: detectDatabaseCall(sourceText),
     };
 }
 
@@ -424,6 +537,7 @@ function extractFromCommonJS(
                 if (!name) name = match[1]; // exports.foo → "foo"
                 if (!name) return; // module.exports = function() {} — anonymous, skip
 
+                const sourceText = right.getText();
                 results.push({
                     id: makeFunctionId(relativePath, name),
                     name,
@@ -436,6 +550,8 @@ function extractFromCommonJS(
                     calls: extractCallNames(right),
                     calledBy: [],
                     analysisConfidence: "high",
+                    hasAuthCheck: detectAuthCheck(sourceText),
+                    hasDatabaseCall: detectDatabaseCall(sourceText),
                 });
                 return;
             }
@@ -454,6 +570,7 @@ function extractFromCommonJS(
                         initKind === SyntaxKind.FunctionExpression ||
                         initKind === SyntaxKind.ArrowFunction
                     ) {
+                        const sourceText = init.getText();
                         results.push({
                             id: makeFunctionId(relativePath, propName),
                             name: propName,
@@ -466,6 +583,8 @@ function extractFromCommonJS(
                             calls: extractCallNames(init),
                             calledBy: [],
                             analysisConfidence: "high",
+                            hasAuthCheck: detectAuthCheck(sourceText),
+                            hasDatabaseCall: detectDatabaseCall(sourceText),
                         });
                     }
                 });

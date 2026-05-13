@@ -255,6 +255,9 @@ async function processChunk(
                 cycleScore: undefined,
                 hubScore: undefined,
                 architecturalImportance: undefined,
+                // Phase 4: barrel detection signals from fileLevel.ts
+                isBarrel:         fileLevelResult.isBarrel,
+                barrelTargets:    fileLevelResult.barrelExportSpecifiers,
             });
 
         } catch (err) {

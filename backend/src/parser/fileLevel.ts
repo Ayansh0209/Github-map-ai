@@ -21,6 +21,13 @@ export interface FileLevelResult {
     // Detected via AST call expression scan — no cost beyond existing traversal
     hasStartupSignals: boolean;    // app.listen(), createServer(), http.listen()
     hasRouteHandlers: boolean;     // app.get/post/use(), router.get/post/put/delete/use()
+
+    // ── Phase 4: barrel file detection ─────────────────────────────────────────────
+    // A barrel file has no implementations — only re-export declarations.
+    // When true, the retrieval builder treats this file as a pass-through
+    // and resolves barrelExportSpecifiers to real implementation fileIds.
+    isBarrel: boolean;
+    barrelExportSpecifiers: string[]; // raw specifiers from re-export declarations
 }
 
 export interface RawImport {
@@ -186,6 +193,49 @@ export function extractFileLevel(
         .filter((imp) => !imp.specifier.startsWith(".") && !imp.specifier.startsWith("/"))
         .map((imp) => imp.specifier);
 
+    // ── Phase 4: Barrel file detection ───────────────────────────────────────────────
+    //
+    // A barrel file satisfies TWO conditions:
+    //   1. ALL imports are re-exports (kind === "re-export") — no regular static
+    //      imports or dynamic requires. An empty file also qualifies as non-barrel.
+    //   2. The file has no local implementations: no FunctionDeclaration,
+    //      no ClassDeclaration, and no VariableDeclaration whose initializer
+    //      is a function (arrow or function expression).
+    //
+    // We check condition 2 via AST queries that are already efficient in ts-morph.
+    // This runs AFTER import extraction — no redundant traversal.
+
+    let isBarrel = false;
+    const barrelExportSpecifiers: string[] = [];
+
+    const hasOnlyReExports =
+        rawImports.length > 0 &&
+        rawImports.every((imp) => imp.kind === "re-export");
+
+    if (hasOnlyReExports) {
+        // Check condition 2: no local function/class/variable-with-function declarations
+        const hasFunctionDecls = sourceFile.getFunctions().length > 0;
+        const hasClassDecls = sourceFile.getClasses().length > 0;
+
+        // Variable declarations whose initializer is an arrow function or function expression
+        const hasVariableFunctions = sourceFile.getVariableDeclarations().some((varDecl) => {
+            const init = varDecl.getInitializer();
+            if (!init) return false;
+            const kind = init.getKind();
+            return kind === SyntaxKind.ArrowFunction || kind === SyntaxKind.FunctionExpression;
+        });
+
+        if (!hasFunctionDecls && !hasClassDecls && !hasVariableFunctions) {
+            isBarrel = true;
+            // Collect the re-export specifiers so the builder can resolve them
+            for (const imp of rawImports) {
+                if (imp.kind === "re-export") {
+                    barrelExportSpecifiers.push(imp.specifier);
+                }
+            }
+        }
+    }
+
     return {
         relativePath,
         language,
@@ -194,5 +244,7 @@ export function extractFileLevel(
         unresolvedImports: [],                  // filled after resolver runs
         hasStartupSignals,
         hasRouteHandlers,
+        isBarrel,
+        barrelExportSpecifiers,
     };
 }
