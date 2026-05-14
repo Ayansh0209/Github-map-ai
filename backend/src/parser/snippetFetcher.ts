@@ -78,6 +78,13 @@ const RAW_FILE_CACHE_TTL_SECONDS = 3600;
  */
 const MAX_TOTAL_SNIPPETS = 20;
 
+/**
+ * Emergency safety cap (lines). Any snippet exceeding this is hard-truncated.
+ * This is NOT primary filtering — it's a final safety net for parser edge cases
+ * where line numbers are wrong or files are unexpectedly huge.
+ */
+const MAX_SNIPPET_LINES = 1200;
+
 // ── Token-based function selection ────────────────────────────────────────────
 
 /**
@@ -222,8 +229,8 @@ function semanticTruncate(body: string): string {
     for (let i = 0; i < middle.length; i++) {
         if (isHighSignal(middle[i])) {
             for (let j = Math.max(0, i - CONTEXT_AROUND_HIGH_SIGNAL);
-                     j <= Math.min(middle.length - 1, i + CONTEXT_AROUND_HIGH_SIGNAL);
-                     j++) {
+                j <= Math.min(middle.length - 1, i + CONTEXT_AROUND_HIGH_SIGNAL);
+                j++) {
                 keepIndices.add(j);
             }
         }
@@ -306,7 +313,7 @@ function sliceFunctionBody(
 ): string {
     const lines = rawContent.split("\n");
     const start = Math.max(0, startLine - 1);
-    const end   = Math.min(lines.length, endLine);
+    const end = Math.min(lines.length, endLine);
     return lines.slice(start, end).join("\n");
 }
 
@@ -353,6 +360,8 @@ export async function fetchSnippets(
     interface SelectedFile {
         candidateEntry: CandidateFileEntry;
         selectedFunctions: Array<{ fn: RetrievalFunction; reasons: string[] }>;
+        /** Indicates how to handle files with 0 selected functions */
+        zeroFunctionMode?: "pr-no-metadata" | "structure-pr-partial" | "zero-pr-partial";
     }
 
     const selectedFiles: SelectedFile[] = [];
@@ -360,17 +369,55 @@ export async function fetchSnippets(
     for (const candidate of candidates) {
         const fileEntry = fileMap.get(candidate.fileId);
 
-        // Guard — Barrel files: barrel expansion already added implementation
-        // targets to the candidate set. The barrel itself has only re-exports.
-        if (fileEntry?.isBarrel) {
-            console.log(`\x1b[33m[snippetFetcher] dropping ${candidate.fileId} — barrel file, targets already in candidates\x1b[0m`);
+
+
+        if (fileEntry?.isBarrel === true) {
+            console.log(`\x1b[33m[snippetFetcher] dropping ${candidate.fileId} — barrel (isBarrel=true)\x1b[0m`);
             continue;
         }
 
         if (!fileEntry) {
-            // File not in retrieval index — include if PR-sourced
+
             if (candidate.source === "pr") {
-                selectedFiles.push({ candidateEntry: candidate, selectedFunctions: [] });
+                selectedFiles.push({ candidateEntry: candidate, selectedFunctions: [], zeroFunctionMode: "pr-no-metadata" });
+            }
+            continue;
+        }
+
+        const looksLikeBarrel = fileEntry.functions.length === 0
+            && (fileEntry.structures?.length ?? 0) === 0
+            && fileEntry.imports.length > 0;
+
+        if (looksLikeBarrel) {
+            console.log(`\x1b[33m[snippetFetcher] dropping ${candidate.fileId} — structural barrel (0 fns, 0 structs, has imports)\x1b[0m`);
+            continue;
+        }
+
+        // ── Zero-function handling ─────────────────────────────────────────────
+        if (fileEntry.functions.length === 0) {
+            const structCount = fileEntry.structures?.length ?? 0;
+
+            if (structCount > 0) {
+                // CASE A — Structure-only file (types, interfaces, enums, consts)
+                if (candidate.source === "pr") {
+                    // PR-linked structure file: keep a tiny preview (first 40-80 lines)
+                    console.log(`\x1b[33m[snippetFetcher] structure-only PR file — partial fetch ${candidate.fileId}\x1b[0m`);
+                    selectedFiles.push({ candidateEntry: candidate, selectedFunctions: [], zeroFunctionMode: "structure-pr-partial" });
+                } else {
+                    // Non-PR structure-only: drop entirely
+                    console.log(`\x1b[33m[snippetFetcher] dropping ${candidate.fileId} — structure-only file (${structCount} structures)\x1b[0m`);
+                }
+            } else {
+                // CASE B — True zero-content file (no functions, no structures)
+                if (candidate.source === "pr") {
+                    // PR-sourced: keep partial preview
+                    console.log(`\x1b[33m[snippetFetcher] partial PR fallback fetch ${candidate.fileId}\x1b[0m`);
+                    selectedFiles.push({ candidateEntry: candidate, selectedFunctions: [], zeroFunctionMode: "zero-pr-partial" });
+                } else {
+                    // Non-PR zero-content: drop if large, keep partial if small
+                    // lineCount is not on RetrievalFileEntry — estimate from structures
+                    console.log(`\x1b[33m[snippetFetcher] dropping ${candidate.fileId} — empty file (0 functions, 0 structures)\x1b[0m`);
+                }
             }
             continue;
         }
@@ -403,22 +450,42 @@ export async function fetchSnippets(
 
         if (!rawContent) continue;
 
-        // If no functions were selected (e.g. PR file not in retrieval index),
-        // include the whole file truncated
+        // ── Zero-function modes: controlled partial fetch ──────────────────
         if (selectedFunctions.length === 0) {
             const lines = rawContent.split("\n");
-            const body = lines.length > HUGE_FUNCTION_LINES
-                ? lines.slice(0, HUGE_FUNCTION_LINES).join("\n") + `\n// ... [${lines.length - HUGE_FUNCTION_LINES} more lines omitted] ...`
-                : rawContent;
+            const { zeroFunctionMode } = selectedFiles.find(sf => sf.candidateEntry.fileId === fileId)!;
+
+            // Determine how many lines to preview based on mode
+            let previewLines: number;
+            let reason: string;
+
+            switch (zeroFunctionMode) {
+                case "structure-pr-partial":
+                    previewLines = Math.min(80, lines.length);
+                    reason = "PR-sourced structure-only file (partial preview)";
+                    break;
+                case "zero-pr-partial":
+                    previewLines = Math.min(80, lines.length);
+                    reason = "PR-sourced zero-content file (partial preview)";
+                    break;
+                case "pr-no-metadata":
+                default:
+                    previewLines = Math.min(80, lines.length);
+                    reason = "PR-sourced file (no function metadata, partial preview)";
+                    break;
+            }
+
+            const body = lines.slice(0, previewLines).join("\n")
+                + (lines.length > previewLines ? `\n// ... [${lines.length - previewLines} more lines omitted] ...` : "");
 
             snippets.push({
                 fileId,
-                functionName: "(entire file)",
+                functionName: "(partial file)",
                 functionId: `${fileId}::*`,
                 body,
                 startLine: 1,
-                endLine: lines.length,
-                selectionReasons: ["PR-sourced file (no function metadata available)"],
+                endLine: previewLines,
+                selectionReasons: [reason],
                 candidateSource: source,
             });
             continue;
@@ -428,7 +495,15 @@ export async function fetchSnippets(
         for (const { fn, reasons } of selectedFunctions) {
             if (snippets.length >= MAX_TOTAL_SNIPPETS) break;
 
-            const rawBody = sliceFunctionBody(rawContent, fn.startLine, fn.endLine);
+            let rawBody = sliceFunctionBody(rawContent, fn.startLine, fn.endLine);
+
+            // Emergency safety cap — hard-truncate if parser line numbers are wrong
+            const rawLines = rawBody.split("\n");
+            if (rawLines.length > MAX_SNIPPET_LINES) {
+                console.warn(`\x1b[31m[snippetFetcher] truncating oversized snippet ${fileId}::${fn.name} (${rawLines.length} lines → ${MAX_SNIPPET_LINES})\x1b[0m`);
+                rawBody = rawLines.slice(0, MAX_SNIPPET_LINES).join("\n") + `\n// ... [truncated at ${MAX_SNIPPET_LINES} lines] ...`;
+            }
+
             const body = semanticTruncate(rawBody);
 
             snippets.push({

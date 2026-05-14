@@ -31,75 +31,15 @@ import type {
     SemanticRole,
 } from "../models/retrieval";
 
-// ── Semantic role heuristics ──────────────────────────────────────────────────
-//
-// These patterns are checked against the file path (lowercased) and the
-// file's function kinds. Order matters — more specific patterns first.
-//
-// Reasoning:
-//   - "resolver" directories are dominant in GraphQL backends (Talawa, etc.)
-//   - "mutation" and "query" are common GraphQL code-split patterns
-//   - "auth" / "guard" / "permission" are universal across REST and GraphQL
-//   - "middleware" catches Express/Koa/NestJS interceptors
-//   - "service" / "manager" are business-logic layer patterns
-//   - "controller" is a REST-specific pattern
-//   - "repository" / "dao" / "store" are data-access layer patterns
-//   - "model" / "entity" / "schema" describe ORM model files
-//   - "util" / "helper" / "lib" / "common" are utility patterns
-//   - "config" / "env" / "setup" are configuration patterns
-//   - "test" / "spec" are test file patterns
-//   - "__generated__" is GraphQL code-gen output (schema, resolvers)
-//   - "types" / "interfaces" are declaration-only patterns
 
-const ROLE_PATTERNS: Array<{ pattern: RegExp; role: SemanticRole }> = [
-    // Test files — check first since tests may live in any directory
-    { pattern: /\.(test|spec)\.(ts|js|tsx|jsx)$|\/__(tests?|mocks?)__\//i, role: "test" },
-
-    // GraphQL-specific
-    { pattern: /\/resolvers?\/|resolver\.(ts|js)$/i, role: "resolver" },
-    { pattern: /\/mutations?\/|mutation\.(ts|js)$/i, role: "mutation" },
-    { pattern: /\/queries\/|query\.(ts|js)$/i,       role: "query" },
-    // GraphQL schema/typedefs — not the same as ORM model
-    { pattern: /typeDefs|type-defs|graphql.*schema|schema\.graphql|\.graphql$/i, role: "schema" },
-    // Generated GraphQL code — treat as schema
-    { pattern: /__generated__|generated-types|codegen/i, role: "schema" },
-
-    // Auth / permissions — universal
-    { pattern: /\/auth\/|\/guards?\/|\/permissions?\/|auth\.(ts|js)$/i, role: "auth" },
-    { pattern: /\/middleware\/|middleware\.(ts|js)$|\.middleware\.(ts|js)$/i, role: "middleware" },
-
-    // REST-specific controller layer
-    { pattern: /\/controllers?\/|controller\.(ts|js)$|\.controller\.(ts|js)$/i, role: "controller" },
-
-    // Business logic / service layer
-    { pattern: /\/services?\/|service\.(ts|js)$|\.service\.(ts|js)$|\/managers?\//i, role: "service" },
-
-    // Data access layer
-    { pattern: /\/repositor(y|ies)\/|repository\.(ts|js)$|\.repository\.(ts|js)$|\/dao\/|\/stores?\//i, role: "repository" },
-
-    // ORM models / entities
-    { pattern: /\/models?\/|\/entities\/|model\.(ts|js)$|\.model\.(ts|js)$|entity\.(ts|js)$|\.entity\.(ts|js)$/i, role: "model" },
-
-    // Config / environment
-    { pattern: /\/config\/|config\.(ts|js)$|\.config\.(ts|js)$|\/env\/|env\.(ts|js)$/i, role: "config" },
-
-    // Utilities / helpers — check after service/model so we don't mis-classify
-    { pattern: /\/utils?\/|\/helpers?\/|\/lib\/|\/common\/|util\.(ts|js)$|helper\.(ts|js)$/i, role: "util" },
-];
-
-/**
- * Determine the semantic role of a file from its path.
- *
- * Falls back to "barrel" if the file is detected as a barrel,
- * then "unknown" if no pattern matches.
- */
 function detectSemanticRole(fileId: string, isBarrel: boolean): SemanticRole {
     if (isBarrel) return "barrel";
 
-    const lowerPath = fileId.toLowerCase();
-    for (const { pattern, role } of ROLE_PATTERNS) {
-        if (pattern.test(lowerPath)) return role;
+    // Test file detection — universal across all JS/TS projects
+    if (/\.(test|spec)\.(ts|js|tsx|jsx)$|\/__(tests?|mocks?)__\//i.test(fileId)) {
+        return "test";
     }
+
     return "unknown";
 }
 
@@ -156,17 +96,17 @@ function resolveBarrelTargets(fileId: string, importEdges: ImportEdge[]): string
  */
 function mapFunction(fn: FunctionNode): RetrievalFunction {
     return {
-        id:              fn.id,
-        name:            fn.name,
-        filePath:        fn.filePath,
-        startLine:       fn.startLine,
-        endLine:         fn.endLine,
-        kind:            fn.kind,
-        isExported:      fn.isExported,
-        isAsync:         fn.isAsync ?? false,
-        hasAuthCheck:    fn.hasAuthCheck    ?? false,
+        id: fn.id,
+        name: fn.name,
+        filePath: fn.filePath,
+        startLine: fn.startLine,
+        endLine: fn.endLine,
+        kind: fn.kind,
+        isExported: fn.isExported,
+        isAsync: fn.isAsync ?? false,
+        hasAuthCheck: fn.hasAuthCheck ?? false,
         hasDatabaseCall: fn.hasDatabaseCall ?? false,
-        calls:           fn.calls,
+        calls: fn.calls,
     };
 }
 
@@ -198,7 +138,7 @@ export function buildRetrievalIndex(
 
     // ── Build lookup structures ───────────────────────────────────────────────
     const importedByMap = buildImportedByMap(importEdges);
-    const importsMap    = buildImportsMap(importEdges);
+    const importsMap = buildImportsMap(importEdges);
 
     // Group functions by file for fast lookup
     const functionsByFile = new Map<string, FunctionNode[]>();
@@ -209,8 +149,28 @@ export function buildRetrievalIndex(
     }
 
     // ── Build file entries ────────────────────────────────────────────────────
+    // Pre-build a set of files that have re-export edges — used for fallback
+    // barrel detection when the parser did not set isBarrel on FileNode.
+    const filesWithReExports = new Set<string>(
+        importEdges
+            .filter(e => e.kind === "re-export")
+            .map(e => e.source)
+    );
+
     const files: RetrievalFileEntry[] = fileNodes.map((file) => {
-        const isBarrel = file.isBarrel ?? false;
+        const fileFunctionsRaw = functionsByFile.get(file.id) ?? [];
+        const fileStructures = (file.structures ?? []);
+
+        // Barrel detection with fallback:
+        // 1. Use parser-set isBarrel if available
+        // 2. Fallback: no functions, no structures, has re-export edges
+        //    This catches index.ts files the parser missed
+        const isBarrel = file.isBarrel === true || (
+            fileFunctionsRaw.length === 0 &&
+            fileStructures.length === 0 &&
+            filesWithReExports.has(file.id)
+        );
+
         const barrelTargets = isBarrel
             ? resolveBarrelTargets(file.id, importEdges)
             : [];
@@ -218,18 +178,25 @@ export function buildRetrievalIndex(
         const semanticRole = detectSemanticRole(file.id, isBarrel);
 
         const importedBy = [...(importedByMap.get(file.id) ?? [])];
-        const imports    = [...(importsMap.get(file.id) ?? [])];
+        const imports = [...(importsMap.get(file.id) ?? [])];
 
-        const fileFunctions = (functionsByFile.get(file.id) ?? []).map(mapFunction);
+        const fileFunctions = fileFunctionsRaw.map(mapFunction);
+
+        const structures = fileStructures.map(s => ({
+            name: s.name,
+            startLine: s.startLine,
+            endLine: s.endLine,
+        }));
 
         return {
-            fileId:       file.id,
+            fileId: file.id,
             isBarrel,
             barrelTargets,
             semanticRole,
             importedBy,
             imports,
-            functions:    fileFunctions,
+            functions: fileFunctions,
+            structures,
         };
     });
 

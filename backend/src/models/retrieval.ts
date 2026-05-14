@@ -40,23 +40,7 @@
 // test      — Test file
 // barrel    — Index/barrel file (re-exports only, no implementations)
 // unknown   — Could not be determined
-export type SemanticRole =
-    | "resolver"
-    | "mutation"
-    | "query"
-    | "schema"
-    | "auth"
-    | "middleware"
-    | "service"
-    | "controller"
-    | "repository"
-    | "model"
-    | "util"
-    | "config"
-    | "test"
-    | "barrel"
-    | "unknown";
-
+export type SemanticRole = "barrel" | "test" | "unknown";
 // ── RetrievalFunction ─────────────────────────────────────────────────────────
 //
 // A function entry in the retrieval index. Carries retrieval-oriented signals
@@ -126,6 +110,14 @@ export interface RetrievalFileEntry {
 
     // ── Functions ─────────────────────────────────────────────────────────────
     functions: RetrievalFunction[];
+
+    // ── Structures ────────────────────────────────────────────────────────────
+    //
+    // Exported semantic blocks (types, interfaces, enums, const objects) that
+    // the parser extracted but are NOT functions. Used by snippetFetcher to
+    // distinguish structure-only files (e.g. generated schema types) from
+    // truly empty files.
+    structures: Array<{ name: string; startLine: number; endLine: number }>;
 }
 
 // ── RetrievalIndex ────────────────────────────────────────────────────────────
