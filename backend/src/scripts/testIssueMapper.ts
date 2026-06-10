@@ -64,7 +64,14 @@ const mockIndex: SearchIndex = {
 // ── Runner ───────────────────────────────────────────────────────────────────
 
 function runTest(testName: string, query: string, expectedTopFile: string) {
+    console.log(`\n▶ TEST: ${testName}`);
+    console.log(`  Query: "${query}"`);
+    
     const result = mapIssueToCode(query, mockIndex, 5);
+    
+    console.log(`  Tokens: ${result.matchedKeywords.join(", ")}`);
+    console.log(`  Confidence: ${result.confidenceScore}`);
+    
     if (result.topFiles.length === 0) {
         console.error("  ❌ FAILED: No files matched");
         return;
@@ -73,16 +80,25 @@ function runTest(testName: string, query: string, expectedTopFile: string) {
     const actualTopFile = result.topFiles[0].filePath;
     
     if (actualTopFile === expectedTopFile) {
+        console.log(`  ✅ PASSED (Top file: ${actualTopFile})`);
     } else {
         console.error(`  ❌ FAILED`);
         console.error(`     Expected: ${expectedTopFile}`);
         console.error(`     Actual:   ${actualTopFile}`);
     }
+    
+    console.log("  Top Reasons:");
     for (const reason of result.topFiles[0].matchedReasons.slice(0, 3)) {
+        console.log(`    - ${reason}`);
     }
 }
 
 // ── Test Cases ───────────────────────────────────────────────────────────────
+
+console.log("========================================");
+console.log("  Running Issue Mapper Validation Suite");
+console.log("========================================");
+
 runTest(
     "Auth bug targeting login function",
     "Users cannot login, the auth service is throwing an error",
