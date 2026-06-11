@@ -70,6 +70,8 @@ export interface ImportEdgeDTO {
   weight?: number;
   isCircular?: boolean;
   isTestCoverage?: boolean;
+  // Frontend-only: synthetic edge bridging a connection through filtered-out files
+  isGhost?: boolean;
 }
 
 export interface FileGraphPayload {

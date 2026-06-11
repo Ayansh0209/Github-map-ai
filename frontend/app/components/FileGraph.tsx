@@ -368,9 +368,12 @@ function FileGraph({
       svgRef.current = svg;
 
       const defs = svg.append("defs");
-      for (const [id, col] of [["default", "#252c36"], ["highlight", "#58a6ff"]] as [string, string][]) {
+      // refX 8 + per-tick endpoint shortening = arrowheads always sit exactly
+      // at the node's edge, whatever its radius (was refX 22 — arrows were
+      // buried inside big nodes and floating outside small ones)
+      for (const [id, col] of [["default", "#3d444d"], ["highlight", "#58a6ff"]] as [string, string][]) {
         defs.append("marker").attr("id", `arrow-${id}`).attr("viewBox", "0 -5 10 10")
-          .attr("refX", 22).attr("refY", 0).attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto")
+          .attr("refX", 8).attr("refY", 0).attr("markerWidth", 6).attr("markerHeight", 6).attr("orient", "auto")
           .append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", col);
       }
       // Hub glow filter
@@ -386,6 +389,13 @@ function FileGraph({
         .on("zoom", ev => {
           g.attr("transform", ev.transform);
           zoomStateRef.current = ev.transform;
+          // Label decluttering: when zoomed out, only hubs/core files keep
+          // labels — hundreds of overlapping labels were unreadable noise
+          const k = ev.transform.k;
+          g.selectAll<SVGGElement, SimNode>("g.node-label")
+            .style("display", (d: SimNode) =>
+              k >= 0.55 || !d || d.isHub || representativeFilesSet.has(d.id) ? "block" : "none"
+            );
         });
       zoomRef.current = zoom;
       svg.call(zoom);
@@ -419,10 +429,11 @@ function FileGraph({
       // 5. Edges
       const link = g.append("g")
         .selectAll<SVGLineElement, SimLink>("line").data(links).join("line")
-        .attr("stroke", d => d.data.isCircular ? "#f85149" : d.data.isTypeOnly ? "#1c2128" : "#252c36")
-        .attr("stroke-width", d => d.data.isTypeOnly ? 0.5 : Math.max(1, (d.data.weight || 1) * 0.8))
-        .attr("stroke-dasharray", d => d.data.isCircular ? "6,4" : d.data.kind === "dynamic" ? "5,3" : "none")
-        .attr("stroke-opacity", d => d.data.isCircular ? 1 : 0.7).attr("marker-end", "url(#arrow-default)");
+        .attr("stroke", d => d.data.isGhost ? "#6e7681" : d.data.isCircular ? "#f85149" : d.data.isTypeOnly ? "#1c2128" : "#2d333b")
+        .attr("stroke-width", d => d.data.isGhost ? 1 : d.data.isTypeOnly ? 0.5 : Math.max(1, (d.data.weight || 1) * 0.8))
+        .attr("stroke-dasharray", d => d.data.isGhost ? "2,6" : d.data.isCircular ? "6,4" : d.data.kind === "dynamic" ? "5,3" : "none")
+        .attr("stroke-opacity", d => d.data.isGhost ? 0.5 : d.data.isCircular ? 1 : 0.7)
+        .attr("marker-end", d => d.data.isGhost ? null : "url(#arrow-default)");
       linkRef.current = link;
 
       // 6. Nodes
@@ -567,11 +578,25 @@ function FileGraph({
         sim.alpha(0);
       }
 
-      sim.on("tick", () => {
-        link.attr("x1", d => (d.source as SimNode).x!).attr("y1", d => (d.source as SimNode).y!)
-          .attr("x2", d => (d.target as SimNode).x!).attr("y2", d => (d.target as SimNode).y!);
+      const render = () => {
+        link.each(function (d) {
+          const sN = d.source as SimNode, tN = d.target as SimNode;
+          const sx = sN.x ?? 0, sy = sN.y ?? 0, tx = tN.x ?? 0, ty = tN.y ?? 0;
+          const dx = tx - sx, dy = ty - sy;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const sr = getRadius(sN, representativeFilesSet) + 2;
+          const tr = getRadius(tN, representativeFilesSet) + 6; // room for the arrowhead
+          d3.select(this)
+            .attr("x1", sx + (dx / dist) * sr).attr("y1", sy + (dy / dist) * sr)
+            .attr("x2", tx - (dx / dist) * tr).attr("y2", ty - (dy / dist) * tr);
+        });
         nodeG.attr("transform", d => `translate(${d.x ?? 0},${d.y ?? 0})`);
-      });
+      };
+
+      sim.on("tick", render);
+      // Static first paint from the dagre layout — needed because rebuilds
+      // (e.g. after filtering) run with alpha 0 and may never tick
+      render();
 
       sim.on("end", () => {
         // Auto-fit only once
@@ -685,6 +710,7 @@ function FileGraph({
             <div className="flex items-center gap-2 mt-1"><span className="w-3 h-3 rounded-full" style={{ background: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Core File</span></div>
             <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#22c55e" }} /><span style={{ color: "#e6edf3" }}>Test file</span></div>
             <div className="flex items-center gap-2"><span className="w-3 h-0.5" style={{ background: "#f85149", borderTop: "2px dashed #f85149" }} /><span style={{ color: "#e6edf3" }}>Circular Dep</span></div>
+            <div className="flex items-center gap-2"><span className="w-3 h-0.5" style={{ borderTop: "2px dotted #6e7681" }} /><span style={{ color: "#e6edf3" }}>Via hidden files</span></div>
             <div className="flex items-center gap-2"><svg width="12" height="12" viewBox="0 0 20 20"><path d="M10 0L20 10L10 20L0 10Z" fill="#6b7280" /></svg><span style={{ color: "#e6edf3" }}>Config</span></div>
             <div className="flex items-center gap-2"><span className="w-3 h-3 rounded-full border border-dashed" style={{ borderColor: "#f85149", opacity: 0.5 }} /><span style={{ color: "#e6edf3" }}>Dead Code</span></div>
             <div className="flex items-center gap-2 pt-1" style={{ borderTop: "1px solid #30363d", marginTop: "4px" }}>

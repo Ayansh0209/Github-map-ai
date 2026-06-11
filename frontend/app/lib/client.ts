@@ -29,7 +29,7 @@ export type {
   ArchitectureMapResponse,
 } from "./types";
 
-import type { AnalyzeResponse, StatusResponse, SearchResponse, IssueMappingResult, IssueMapRequest, IssueMapResult, FunctionFilePayload, ArchitectureMapResponse } from "./types";
+import type { AnalyzeResponse, StatusResponse, SearchResponse, IssueMappingResult, IssueMapRequest, IssueMapResult, FunctionFilePayload, ArchitectureMapResponse, FileGraphPayload } from "./types";
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -191,6 +191,25 @@ export async function fetchArchitectureMap(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Failed to fetch architecture map" }));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * Fetch the full file graph for a repo from the backend.
+ * The server sends gzipped JSON (Content-Encoding: gzip) — the browser
+ * decompresses transparently, so a 30MB graph travels as ~3MB.
+ */
+export async function fetchFileGraph(
+  owner: string,
+  repo: string,
+  sha?: string,
+): Promise<FileGraphPayload> {
+  const params = sha ? `?sha=${encodeURIComponent(sha)}` : "";
+  const res = await fetch(`${API_BASE}/graph/${owner}/${repo}${params}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: "Failed to fetch graph" }));
     throw new Error(err.error || `HTTP ${res.status}`);
   }
   return res.json();

@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, Suspense, useMemo } from "react";
-import { fetchFileContent, fetchFileFunctions } from "../lib/client";
+import { fetchFileContent, fetchFileFunctions, fetchFileGraph } from "../lib/client";
+import { loadGraphPayload, saveGraphPayload, deleteGraphPayload, graphKey } from "../lib/graphStore";
 import { sanitizeFileId } from "../lib/graphHelpers";
 import { useRouter, useSearchParams } from "next/navigation";
 import Navbar from "../components/Navbar";
@@ -21,6 +22,7 @@ import type {
   IssueMapResult,
   StatusResponse,
   RepoModuleDTO,
+  ImportEdgeDTO,
 } from "../lib/types";
 
 function RepoPageContent() {
@@ -49,48 +51,60 @@ function RepoPageContent() {
     checkWarning();
   }, []);
 
-  // ── Load result from sessionStorage ─────────────────────────────────────────
+  // ── Load graph: IndexedDB cache → backend /graph endpoint ───────────────────
+  // IndexedDB has no 5MB cap (big repos work), and the API fallback means a
+  // direct link to /repo?repo=owner/name works even in a fresh browser.
   const [result, setResult] = useState<StatusResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    const stored = sessionStorage.getItem('codemap_graph');
-    if (!stored) {
-      console.log('[repo] no graph data in sessionStorage, redirecting');
-      router.replace('/');
-      return;
-    }
+    const repoParam = searchParams.get("repo") ?? "";
+    const [qOwner, qRepo] = repoParam.split("/");
 
-    try {
-      const graphData = JSON.parse(stored);
+    let cancelled = false;
 
-      // Also try to load function files
-      let functionFiles = {};
-      const storedFunctions = sessionStorage.getItem('codemap_functions');
-      if (storedFunctions) {
-        functionFiles = JSON.parse(storedFunctions);
+    (async () => {
+      try {
+        let payload: any = qOwner && qRepo
+          ? await loadGraphPayload(graphKey(qOwner, qRepo))
+          : null;
+
+        if (!payload?._inlineFileGraph && qOwner && qRepo) {
+          console.log("[repo] no cached graph — fetching from backend");
+          try {
+            const graph = await fetchFileGraph(qOwner, qRepo);
+            payload = {
+              owner: qOwner,
+              repo: qRepo,
+              commitSha: (graph as any).commitSha,
+              stats: (graph as any).stats,
+              _inlineFileGraph: graph,
+            };
+            saveGraphPayload(graphKey(qOwner, qRepo), payload).catch(() => {});
+          } catch (err) {
+            console.warn("[repo] backend fetch failed:", err);
+          }
+        }
+
+        if (cancelled) return;
+
+        if (!payload?._inlineFileGraph) {
+          console.log("[repo] no graph available, redirecting to landing");
+          router.replace("/");
+          return;
+        }
+
+        setResult({ ...payload, _functionFiles: {} });
+      } catch (err) {
+        console.error("[repo] failed to load graph:", err);
+        if (!cancelled) router.replace("/");
+      } finally {
+        if (!cancelled) setLoaded(true);
       }
+    })();
 
-      setResult({
-        ...graphData,
-        _functionFiles: functionFiles
-      });
-
-      console.log('[repo] loaded graph from sessionStorage:', graphData._inlineFileGraph?.files?.length, 'files');
-    } catch (err) {
-      console.error('[repo] Failed to parse stored graph data:', err);
-      router.replace('/');
-    }
-    setLoaded(true);
-  }, [router]);
-
-  // Redirect if no data
-  useEffect(() => {
-    if (loaded && !result?._inlineFileGraph) {
-      console.log('[page] redirecting to landing, reason:', 'missing _inlineFileGraph in result', { loaded, hasResult: !!result });
-      router.replace("/");
-    }
-  }, [loaded, result, router]);
+    return () => { cancelled = true; };
+  }, [router, searchParams]);
 
   // ── Trust Banner State ──────────────────────────────────────────────────────
   const [showTrustBanner, setShowTrustBanner] = useState(false);
@@ -171,6 +185,58 @@ function RepoPageContent() {
     }
     return filtered;
   }, [fileGraph, activeKinds, activeLanguages, representativeFilesSet]);
+
+  // ── Filter isolation ─────────────────────────────────────────────────────────
+  // When filters are active, non-matching files are REMOVED from the graph
+  // (not just dimmed) and the layout recomputes for only the visible files.
+  // Connections that used to pass through a removed file are preserved as
+  // dashed "ghost" edges so the structure still reads correctly.
+  const displayGraph = useMemo(() => {
+    if (!fileGraph) return null;
+    if (!filteredNodeIds) {
+      return { files: fileGraph.files, edges: fileGraph.importEdges };
+    }
+
+    const files = fileGraph.files.filter(f => filteredNodeIds.has(f.id));
+    const direct = fileGraph.importEdges.filter(
+      e => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target)
+    );
+
+    // Bridge connections through ONE hidden intermediate file
+    const intoHidden = new Map<string, string[]>();   // hidden id → visible sources
+    const outOfHidden = new Map<string, string[]>();  // hidden id → visible targets
+    for (const e of fileGraph.importEdges) {
+      const sVis = filteredNodeIds.has(e.source);
+      const tVis = filteredNodeIds.has(e.target);
+      if (sVis && !tVis) {
+        if (!intoHidden.has(e.target)) intoHidden.set(e.target, []);
+        intoHidden.get(e.target)!.push(e.source);
+      } else if (!sVis && tVis) {
+        if (!outOfHidden.has(e.source)) outOfHidden.set(e.source, []);
+        outOfHidden.get(e.source)!.push(e.target);
+      }
+    }
+
+    const seen = new Set(direct.map(e => `${e.source}->${e.target}`));
+    const ghosts: ImportEdgeDTO[] = [];
+    outer:
+    for (const [hidden, sources] of intoHidden) {
+      const targets = outOfHidden.get(hidden);
+      if (!targets) continue;
+      for (const src of sources) {
+        for (const tgt of targets) {
+          if (src === tgt) continue;
+          const k = `${src}->${tgt}`;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          ghosts.push({ source: src, target: tgt, kind: "static", symbols: [], isTypeOnly: false, isGhost: true });
+          if (ghosts.length >= 500) break outer; // safety cap for huge graphs
+        }
+      }
+    }
+
+    return { files, edges: [...direct, ...ghosts] };
+  }, [fileGraph, filteredNodeIds]);
 
   // ── Issue mapping state ─────────────────────────────────────────────────────
   const [issueResult, setIssueResult] = useState<IssueMapResult | null>(null);
@@ -502,9 +568,9 @@ function RepoPageContent() {
   }, [view]);
 
   const handleAnalyzeAnother = useCallback(() => {
-    sessionStorage.removeItem("codemap-result");
+    if (owner && repo) deleteGraphPayload(graphKey(owner, repo)).catch(() => {});
     router.push("/");
-  }, [router]);
+  }, [router, owner, repo]);
 
   // ── View Source ─────────────────────────────────────────────────────────────
   const handleViewSource = useCallback(async () => {
@@ -645,8 +711,8 @@ function RepoPageContent() {
               onViewChange={handleViewChange}
               onResetView={handleResetView}
               onSearchOpen={() => setSearchPanelOpen(true)}
-              fileCount={fileGraph.files.length}
-              edgeCount={fileGraph.importEdges.length}
+              fileCount={(displayGraph?.files ?? fileGraph.files).length}
+              edgeCount={(displayGraph?.edges ?? fileGraph.importEdges).length}
               hasFunctionSelected={!!selectedFunction}
               focusMode={focusMode}
               onFocusModeToggle={() => setFocusMode(prev => !prev)}
@@ -662,8 +728,8 @@ function RepoPageContent() {
           <div className="flex-1 overflow-hidden">
             <div style={{ display: view === "file-graph" ? "block" : "none", height: "100%" }}>
               <FileGraph
-                files={fileGraph.files}
-                edges={fileGraph.importEdges}
+                files={displayGraph?.files ?? fileGraph.files}
+                edges={displayGraph?.edges ?? fileGraph.importEdges}
                 onFileClick={handleFileClick}
                 owner={owner}
                 repo={repo}
@@ -673,7 +739,6 @@ function RepoPageContent() {
                 highlightedIssueFiles={highlightedIssueFiles}
                 focusMode={focusMode}
                 zoomToNodeRef={zoomToNodeRef}
-                filteredNodeIds={filteredNodeIds}
                 modules={modules}
               />
             </div>

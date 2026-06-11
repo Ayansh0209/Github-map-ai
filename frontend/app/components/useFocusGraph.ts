@@ -149,17 +149,33 @@ export function useFocusGraph({
         layoutSemi(leftNodes, true);
         layoutSemi(rightNodes, false);
       } else {
-        const hSpacing = 180;
+        // Readability: min 36px row spacing (was 22 — labels overlapped into
+        // an unreadable wall) and giant hops wrap into multiple sub-columns
+        // instead of one endless line.
+        const MAX_PER_COLUMN = 22;
+        const SUB_COLUMN_GAP = 170;
         const layoutTree = (colNodes: SimNode[], isLeft: boolean) => {
           const byHop = d3.groups(colNodes, n => n.hop || 1);
-          byHop.forEach(([hop, hopNodes]) => {
-            const x = isLeft ? centerX - hop * hSpacing : centerX + hop * hSpacing;
-            const vSpacing = Math.max(22, Math.min(50, 850 / hopNodes.length));
-            const startY = centerY - ((hopNodes.length - 1) * vSpacing) / 2;
-            hopNodes.sort((a, b) => (b.importance || 0) - (a.importance || 0)).forEach((n, i) => {
-              n.x = x;
-              n.y = startY + i * vSpacing;
+          // horizontal room each hop needs = its own sub-columns
+          let xOffset = 0;
+          byHop.sort((a, b) => a[0] - b[0]).forEach(([_hop, hopNodes]) => {
+            const subCols = Math.ceil(hopNodes.length / MAX_PER_COLUMN);
+            const baseX = isLeft
+              ? centerX - 220 - xOffset
+              : centerX + 220 + xOffset;
+
+            const sorted = hopNodes.sort((a, b) => (b.importance || 0) - (a.importance || 0));
+            sorted.forEach((n, i) => {
+              const col = Math.floor(i / MAX_PER_COLUMN);
+              const row = i % MAX_PER_COLUMN;
+              const rowsInCol = Math.min(MAX_PER_COLUMN, hopNodes.length - col * MAX_PER_COLUMN);
+              const vSpacing = Math.max(36, Math.min(56, 800 / rowsInCol));
+              const startY = centerY - ((rowsInCol - 1) * vSpacing) / 2;
+              n.x = baseX + (isLeft ? -1 : 1) * col * SUB_COLUMN_GAP;
+              n.y = startY + row * vSpacing;
             });
+
+            xOffset += subCols * SUB_COLUMN_GAP + 40;
           });
         };
         layoutTree(leftNodes, true);
@@ -172,8 +188,8 @@ export function useFocusGraph({
     svgRef.current = svg;
 
     const defs = svg.append("defs");
-    defs.append("marker").attr("id", "arrow-dependency").attr("viewBox", "0 -5 10 10").attr("refX", 22).attr("refY", 0).attr("markerWidth", 4).attr("markerHeight", 4).attr("orient", "auto").append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#58a6ff");
-    defs.append("marker").attr("id", "arrow-dependent").attr("viewBox", "0 -5 10 10").attr("refX", 22).attr("refY", 0).attr("markerWidth", 4).attr("markerHeight", 4).attr("orient", "auto").append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#f87171");
+    defs.append("marker").attr("id", "arrow-dependency").attr("viewBox", "0 -5 10 10").attr("refX", 8).attr("refY", 0).attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto").append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#58a6ff");
+    defs.append("marker").attr("id", "arrow-dependent").attr("viewBox", "0 -5 10 10").attr("refX", 8).attr("refY", 0).attr("markerWidth", 5).attr("markerHeight", 5).attr("orient", "auto").append("path").attr("d", "M0,-4L10,0L0,4").attr("fill", "#f87171");
 
     const g = svg.append("g");
     gRef.current = g;
@@ -191,13 +207,37 @@ export function useFocusGraph({
     });
 
     const diagonal = d3.linkHorizontal<any, any>().x(d => d.x).y(d => d.y);
-    const baseEdgeOpacity = Math.max(0.1, 0.4 - (nodes.length / 200) * 0.2);
+    const baseEdgeOpacity = Math.max(0.15, 0.45 - (nodes.length / 200) * 0.2);
+
+    // Single source of truth for node radius — also used to shorten edges so
+    // arrowheads land exactly on the node boundary
+    const nodeR = (d: SimNode): number => {
+      let r = 7;
+      if (d.id === focusedNodeId) r = 18;
+      else if (representativeFilesSet.has(d.id)) r = 14;
+      else if (d.isGroup) r = 10;
+      else if (d.importance > 12) r = 9;
+      if (d.hop && d.hop > 1) r *= 0.85;
+      return r;
+    };
+
+    const shortenedEndpoints = (sNode: SimNode, tNode: SimNode) => {
+      const sx = sNode.x ?? 0, sy = sNode.y ?? 0, tx = tNode.x ?? 0, ty = tNode.y ?? 0;
+      const dx = tx - sx, dy = ty - sy;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const sr = nodeR(sNode) + 2;
+      const tr = nodeR(tNode) + 7;
+      return {
+        source: { x: sx + (dx / dist) * sr, y: sy + (dy / dist) * sr },
+        target: { x: tx - (dx / dist) * tr, y: ty - (dy / dist) * tr },
+      };
+    };
 
     const link = g.append("g").selectAll("path").data(links).join("path")
       .attr("d", d => {
         const s = nodeLookup.get(typeof d.source === "string" ? d.source : (d.source as any).id)!;
         const t = nodeLookup.get(typeof d.target === "string" ? d.target : (d.target as any).id)!;
-        return diagonal({ source: { x: s.x, y: s.y }, target: { x: t.x, y: t.y } });
+        return diagonal(shortenedEndpoints(s, t));
       })
       .attr("fill", "none")
       .attr("stroke", d => {
@@ -229,12 +269,7 @@ export function useFocusGraph({
       const isSearchMatch = !focusSearch || d.data.label.toLowerCase().includes(focusSearch.toLowerCase()) || d.folder.toLowerCase().includes(focusSearch.toLowerCase());
       const hopOpacity = d.hop && d.hop > 1 ? 0.5 : 1;
 
-      let r = 7;
-      if (isFocused) r = 18;
-      else if (representativeFilesSet.has(d.id)) r = 14;
-      else if (d.isGroup) r = 10;
-      else if (d.importance > 12) r = 9;
-      if (d.hop && d.hop > 1) r *= 0.85;
+      const r = nodeR(d);
 
       if (isFocused) {
         g2.append("circle").attr("r", r + 18).attr("fill", "none").attr("stroke", "#f0883e").attr("stroke-width", 3).attr("stroke-opacity", 0.25).attr("class", "glow");
@@ -251,7 +286,7 @@ export function useFocusGraph({
       const labelText = d.isGroup ? `/${d.data.label} (${d.childCount})` : d.data.label;
       const label = g2.append("g").attr("transform", `translate(0, ${r + 20})`);
       label.append("text").attr("text-anchor", "middle")
-        .attr("fill", isFocused ? "#f0883e" : "#e6edf3").attr("font-size", r > 10 ? "11px" : "9px").attr("font-family", "monospace")
+        .attr("fill", isFocused ? "#f0883e" : "#e6edf3").attr("font-size", r > 10 ? "12px" : "10px").attr("font-family", "monospace")
         .attr("opacity", isSearchMatch ? hopOpacity : 0.1)
         .text(trunc(labelText, isTree ? 25 : 20));
     });

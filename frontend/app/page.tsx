@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import InputBar from "./components/InputBar";
 import ProgressBar from "./components/ProgressBar";
 import { useJobPolling } from "./hooks/useJobPolling";
-import { submitAnalysis } from "./lib/client";
+import { submitAnalysis, fetchFileGraph } from "./lib/client";
+import { saveGraphPayload, graphKey } from "./lib/graphStore";
 import MobileWarning from "./components/MobileWarning";
 
 export default function Home() {
@@ -41,52 +42,47 @@ export default function Home() {
     status === "delayed";
 
   // ── Navigate to /repo on completion ─────────────────────────────────────────
+  // Small repos arrive inline; big repos are fetched from GET /graph (gzipped).
+  // Either way the graph is stored in IndexedDB (no 5MB sessionStorage limit).
   useEffect(() => {
-    if (status === "done") {
-      console.log('[page] job done, navigating to graph');
-      console.log('[page] fileGraph files:', result?._inlineFileGraph?.files?.length);
+    if (status !== "done" || !result) return;
 
-      if (result?._inlineFileGraph) {
-        try {
-          const graphPayload = {
-            owner: result.owner,
-            repo: result.repo,
-            commitSha: result.commitSha,
-            defaultBranch: result.defaultBranch,
-            stats: result.stats,
-            fileGraphUrl: result.fileGraphUrl,
-            functionsBaseUrl: result.functionsBaseUrl,
-            _inlineFileGraph: result._inlineFileGraph,
-          };
+    const owner = result.owner || "";
+    const repo = result.repo || "";
 
-          const functionsJson = JSON.stringify(result._functionFiles ?? {});
-          const functionsSizeMB = (functionsJson.length / 1024 / 1024).toFixed(1);
-          console.log('[page] functions data size:', functionsSizeMB, 'MB');
+    (async () => {
+      try {
+        let graph = result._inlineFileGraph ?? null;
 
-          try {
-            sessionStorage.setItem('codemap_graph', JSON.stringify(graphPayload));
-            if (parseFloat(functionsSizeMB) < 4) {
-              sessionStorage.setItem('codemap_functions', functionsJson);
-            } else {
-              console.log('[page] functions too large for sessionStorage, will fetch per-file');
-              sessionStorage.removeItem('codemap_functions');
-            }
-          } catch (storageErr) {
-            console.warn('[page] sessionStorage quota exceeded, storing file graph only');
-            sessionStorage.setItem('codemap_graph', JSON.stringify(graphPayload));
-            sessionStorage.removeItem('codemap_functions');
-          }
-        } catch (err) {
-          console.error('[page] Failed to persist graph data:', err);
+        if (!graph) {
+          console.log("[page] graph not inline (big repo) — fetching from /graph endpoint");
+          graph = await fetchFileGraph(owner, repo, result.commitSha);
         }
 
-        const owner = result.owner || "";
-        const repo = result.repo || "";
+        if (!graph) {
+          setSubmitError("Analysis finished but no graph was returned. Please try again.");
+          return;
+        }
+
+        await saveGraphPayload(graphKey(owner, repo), {
+          owner,
+          repo,
+          commitSha: result.commitSha,
+          defaultBranch: result.defaultBranch,
+          stats: result.stats,
+          fileGraphUrl: result.fileGraphUrl,
+          functionsBaseUrl: result.functionsBaseUrl,
+          _inlineFileGraph: graph,
+        });
+
         router.push(`/repo?repo=${owner}/${repo}`);
-      } else {
-        console.log('[page] redirecting to landing, reason: no _inlineFileGraph on done status');
+      } catch (err) {
+        console.error("[page] Failed to load/persist graph:", err);
+        setSubmitError(
+          err instanceof Error ? err.message : "Failed to load the analyzed graph"
+        );
       }
-    }
+    })();
   }, [status, result, router]);
 
   // ── Handlers ────────────────────────────────────────────────────────────────
