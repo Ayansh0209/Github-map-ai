@@ -33,6 +33,11 @@ export const config = {
         secretAccessKey: optional("R2_SECRET_ACCESS_KEY"),
         bucketName: optional("R2_BUCKET_NAME"),
         publicUrl: optional("R2_PUBLIC_URL"),
+        // Generic S3 endpoint — set this to use ANY S3-compatible provider
+        // (Cloudflare R2, Backblaze B2, Supabase Storage, Storj, Wasabi, MinIO).
+        // When set, it takes precedence over the R2 accountId-derived endpoint.
+        endpoint: optional("R2_ENDPOINT"),
+        region: optional("R2_REGION"), // default "auto" (R2); B2/Supabase need a real region
     },
 
     queue: {

@@ -29,7 +29,7 @@ let s3Checked = false;
 
 function r2Configured(): boolean {
     return Boolean(
-        config.r2.accountId &&
+        (config.r2.endpoint || config.r2.accountId) &&
         config.r2.accessKeyId &&
         config.r2.secretAccessKey &&
         config.r2.bucketName
@@ -49,15 +49,21 @@ function getS3(): any | null {
         // Lazy require so the dependency is only needed when R2 is actually used
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const { S3Client } = require("@aws-sdk/client-s3");
+        // Endpoint: explicit R2_ENDPOINT wins (any S3 provider); otherwise derive
+        // the Cloudflare R2 endpoint from the account id.
+        const endpoint = config.r2.endpoint
+            || `https://${config.r2.accountId}.r2.cloudflarestorage.com`;
         s3Client = new S3Client({
-            region: "auto",
-            endpoint: `https://${config.r2.accountId}.r2.cloudflarestorage.com`,
+            region: config.r2.region || "auto",
+            endpoint,
+            // Path-style addressing — required by B2 / Supabase / MinIO, harmless for R2.
+            forcePathStyle: true,
             credentials: {
                 accessKeyId: config.r2.accessKeyId,
                 secretAccessKey: config.r2.secretAccessKey,
             },
         });
-        console.log("[artifactStore] R2 configured — artifacts go to bucket:", config.r2.bucketName);
+        console.log(`[artifactStore] S3 store configured — endpoint: ${endpoint}, bucket: ${config.r2.bucketName}`);
         return s3Client;
     } catch (err) {
         console.warn(
