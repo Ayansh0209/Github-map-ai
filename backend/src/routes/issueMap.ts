@@ -27,6 +27,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { redisConnection } from "../queue/jobQueue";
+import { getFileGraph } from "../storage/artifactStore";
 import {
     fetchIssue,
     fetchOpenIssues,
@@ -216,9 +217,9 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
         let resolvedGraphData = graphData;
         if (!resolvedGraphData) {
             try {
-                const cachedGraph = await redisConnection.get(`graph:${owner}:${repo}`);
-                if (cachedGraph) {
-                    const parsed = JSON.parse(cachedGraph);
+                // R2-first via artifact store (legacy Redis graph: key is the fallback).
+                const parsed = await getFileGraph<{ files?: any[] }>(owner, repo);
+                if (parsed) {
                     resolvedGraphData = {
                         files: (parsed.files ?? []).map((f: any) => ({
                             id:                      f.id as string,
@@ -228,11 +229,11 @@ router.post("/map", async (req: Request, res: Response, next: NextFunction) => {
                         functions: [],
                     };
                     console.log(
-                        `[issueMap] graph data recovered from Redis (${resolvedGraphData.files.length} files)`
+                        `[issueMap] graph data recovered from store (${resolvedGraphData.files.length} files)`
                     );
                 }
             } catch {
-                // Redis down — resolvedGraphData stays null
+                // Store unavailable — resolvedGraphData stays null
             }
         }
 
@@ -399,22 +400,19 @@ router.post("/chat", rateLimiter, async (req: Request, res: Response, next: Next
     const lastMessage = messages[messages.length - 1];
     const lastMessageContent = lastMessage?.content || "";
 
-    // Resolve graphFileIds from Redis
+    // Resolve graphFileIds — R2-first via artifact store (legacy Redis fallback inside).
     const graphFileIds = new Set<string>();
     try {
-      const cachedGraph = await redisConnection.get(`graph:${owner}:${repo}`);
-      if (cachedGraph) {
-        const parsedGraph = JSON.parse(cachedGraph);
-        if (parsedGraph && Array.isArray(parsedGraph.files)) {
-          for (const file of parsedGraph.files) {
-            if (file && typeof file.id === "string") {
-              graphFileIds.add(file.id);
-            }
+      const parsedGraph = await getFileGraph<{ files?: any[] }>(owner, repo, commitSha);
+      if (parsedGraph && Array.isArray(parsedGraph.files)) {
+        for (const file of parsedGraph.files) {
+          if (file && typeof file.id === "string") {
+            graphFileIds.add(file.id);
           }
         }
       }
     } catch (err) {
-      console.warn("[chatRoute] Failed to fetch graph files from Redis:", err);
+      console.warn("[chatRoute] Failed to fetch graph files from store:", err);
     }
 
     const retrievalStartTime = Date.now();

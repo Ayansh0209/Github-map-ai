@@ -267,17 +267,11 @@ export default async function processJob(job: Job<AnalyzeJobData>): Promise<obje
             }
         }
 
-        // ── File graph copy for the issue mapper (kept for compatibility) ─────
-        try {
-            await redisConnection.set(
-                `graph:${owner}:${repo}`,
-                JSON.stringify(fileGraph),
-                "EX",
-                config.artifacts.ttlSeconds
-            );
-        } catch (err) {
-            console.warn("[worker] Failed to persist issue-mapper graph copy:", (err as Error).message);
-        }
+        // NOTE: The issue mapper / search routes used to read a second, full,
+        // UNCOMPRESSED copy of the file graph from `graph:{owner}:{repo}` in
+        // Redis. That duplicated the gzipped fileGraph artifact (R2/Redis) and
+        // was a primary cause of Redis OOM. It is now removed — those routes
+        // read the graph via getFileGraph() (artifact store, R2-first) instead.
 
         // ── Step 11: Build the (slim) result ──────────────────────────────────
         // Small graphs stay inline so the current frontend works unchanged;

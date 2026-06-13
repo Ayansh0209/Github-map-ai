@@ -173,3 +173,34 @@ export async function setLatestSha(owner: string, repo: string, sha: string): Pr
 export async function getLatestSha(owner: string, repo: string): Promise<string | null> {
     return redisConnection.get(`latest-sha:${owner}:${repo}`);
 }
+
+// ── File graph resolver (R2-first, single source of truth) ───────────────────
+// The file graph used to be duplicated as an UNCOMPRESSED blob at
+// `graph:{owner}:{repo}` in Redis — a major source of Redis bloat/OOM, since it
+// duplicated the gzipped fileGraph artifact. This helper makes the artifact
+// store the single source of truth: it reads the gzipped fileGraph from R2 (or
+// the gzipped Redis fallback when R2 is unconfigured), resolving the latest SHA.
+//
+// Legacy fallback: repos analyzed before this change still have the old
+// `graph:{owner}:{repo}` Redis key; we read it once if the artifact is missing,
+// so nothing breaks until those repos are re-analyzed (and their TTL expires).
+export async function getFileGraph<T = any>(
+    owner: string,
+    repo: string,
+    sha?: string
+): Promise<T | null> {
+    const resolvedSha = sha ?? (await getLatestSha(owner, repo));
+    if (resolvedSha) {
+        const fromStore = await getArtifact<T>(artifactKeys.fileGraph(owner, repo, resolvedSha));
+        if (fromStore) return fromStore;
+    }
+
+    // Legacy fallback — old uncompressed Redis copy (pre-migration repos only)
+    try {
+        const legacy = await redisConnection.get(`graph:${owner}:${repo}`);
+        if (legacy) return JSON.parse(legacy) as T;
+    } catch {
+        // ignore — treat as missing
+    }
+    return null;
+}

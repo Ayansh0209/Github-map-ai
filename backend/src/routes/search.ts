@@ -16,6 +16,7 @@ import { z } from "zod";
 import { redisConnection } from "../queue/jobQueue";
 import { searchIndex } from "../search/queryEngine";
 import { mapIssueToCode } from "../parser/issueMapper";
+import { getFileGraph } from "../storage/artifactStore";
 import type { SearchIndex, FileNode } from "../models/schema";
 
 const router = Router();
@@ -51,13 +52,9 @@ async function getSearchIndex(owner: string, repo: string): Promise<SearchIndex 
  */
 async function getFileNodes(owner: string, repo: string): Promise<FileNode[]> {
     try {
-        const key = `graph:${owner}:${repo}`;
-        const cached = await redisConnection.get(key);
-        if (cached) {
-            const parsed = JSON.parse(cached);
-            return (parsed.files ?? []) as FileNode[];
-        }
-        return [];
+        // R2-first via artifact store (legacy Redis graph: key is the fallback).
+        const graph = await getFileGraph<{ files?: FileNode[] }>(owner, repo);
+        return (graph?.files ?? []) as FileNode[];
     } catch {
         return [];
     }
