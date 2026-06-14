@@ -51,8 +51,12 @@ function getS3(): any | null {
         const { S3Client } = require("@aws-sdk/client-s3");
         // Endpoint: explicit R2_ENDPOINT wins (any S3 provider); otherwise derive
         // the Cloudflare R2 endpoint from the account id.
-        const endpoint = config.r2.endpoint
+        let endpoint = config.r2.endpoint
             || `https://${config.r2.accountId}.r2.cloudflarestorage.com`;
+        // Defensive: providers' dashboards often show the host without a scheme
+        // (e.g. "s3.us-east-005.backblazeb2.com"). The S3 client needs a full
+        // URL or it throws "Invalid URL" — so normalize a missing scheme.
+        if (!/^https?:\/\//i.test(endpoint)) endpoint = `https://${endpoint}`;
         s3Client = new S3Client({
             region: config.r2.region || "auto",
             endpoint,

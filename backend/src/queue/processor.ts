@@ -16,7 +16,7 @@
 //     not jobQueue, so no Queue instance is created in the child)
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { Job } from "bullmq";
+import { Job, UnrecoverableError } from "bullmq";
 import { gzipSync, gunzipSync } from "zlib";
 import path from "path";
 import os from "os";
@@ -120,10 +120,43 @@ async function updateProgress(job: Job<AnalyzeJobData>, percent: number, step: s
 
 // ── Main processor ────────────────────────────────────────────────────────────
 
+// ── OOM / capacity guard ──────────────────────────────────────────────────────
+// When Redis is full it rejects writes with "OOM command not allowed". Without
+// guarding, BullMQ keeps retrying/stalling → the job re-parses in a loop. We
+// (a) refuse to start heavy work when Redis is near full, and (b) convert any
+// OOM mid-job into an UnrecoverableError so BullMQ fails it ONCE with a clear,
+// user-facing message instead of looping.
+const CAPACITY_MESSAGE =
+    "Server is at capacity right now (storage full). Please try again in a few minutes.";
+
+function isOOM(err: unknown): boolean {
+    const m = err instanceof Error ? err.message : String(err);
+    return /OOM command not allowed|used memory|maxmemory/i.test(m);
+}
+
+async function assertRedisHeadroom(): Promise<void> {
+    try {
+        const info = await redisConnection.info("memory");
+        const used = Number(/used_memory:(\d+)/.exec(info)?.[1] ?? 0);
+        const max = Number(/maxmemory:(\d+)/.exec(info)?.[1] ?? 0);
+        if (max > 0 && used / max > 0.92) {
+            console.warn(`[worker] Redis near capacity (${used}/${max}) — refusing job`);
+            throw new UnrecoverableError(CAPACITY_MESSAGE);
+        }
+    } catch (err) {
+        if (err instanceof UnrecoverableError) throw err;
+        if (isOOM(err)) throw new UnrecoverableError(CAPACITY_MESSAGE);
+        // INFO unavailable for a benign reason — don't block the job
+    }
+}
+
 export default async function processJob(job: Job<AnalyzeJobData>): Promise<object> {
     const { owner, repo, jobId } = job.data;
 
     console.log(`[worker] Job received: ${owner}/${repo} (jobId: ${jobId}, pid: ${process.pid}, storage: ${storageBackend()})`);
+
+    // Fail fast (no retry loop) if Redis can't accept writes right now.
+    await assertRedisHeadroom();
 
     await updateProgress(job, 0, "starting");
 
@@ -315,6 +348,11 @@ export default async function processJob(job: Job<AnalyzeJobData>): Promise<obje
 
         return result;
 
+    } catch (err) {
+        // An OOM anywhere in the heavy section means Redis filled mid-job.
+        // Surface it once, clearly, with no retry instead of stalling forever.
+        if (isOOM(err)) throw new UnrecoverableError(CAPACITY_MESSAGE);
+        throw err;
     } finally {
         // Cleanup ALWAYS runs — disk never fills up regardless of what goes wrong
         cleanup(jobId);

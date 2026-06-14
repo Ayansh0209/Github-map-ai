@@ -7,11 +7,11 @@ interface ProgressBarProps {
   position: number;
 }
 
-// Pipeline stages in order. Each stage owns a percent range — the active
-// stage is derived from the live progress/step coming from the backend.
+// Pipeline stages in order. Each stage owns a starting percent — the active
+// stage is derived from the live progress coming from the backend.
 const STAGES: { key: string; label: string; from: number }[] = [
   { key: "metadata", label: "Fetching metadata", from: 0 },
-  { key: "download", label: "Downloading repo", from: 10 },
+  { key: "download", label: "Downloading repository", from: 10 },
   { key: "extract", label: "Extracting files", from: 25 },
   { key: "classify", label: "Classifying files", from: 30 },
   { key: "parse", label: "Parsing source", from: 50 },
@@ -19,20 +19,13 @@ const STAGES: { key: string; label: string; from: number }[] = [
   { key: "store", label: "Storing results", from: 85 },
 ];
 
-function CheckIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
-      <path d="M20 6L9 17l-5-5" />
-    </svg>
-  );
-}
-
 export default function ProgressBar({ progress, step, status, position }: ProgressBarProps) {
+  // ── Queued: single calm line ────────────────────────────────────────────────
   if (status === "queued" || status === "delayed") {
     return (
       <div className="w-full max-w-2xl mx-auto mt-8 animate-in fade-in">
         <div className="bg-surface border border-border rounded-2xl p-6 text-center">
-          <div className="flex items-center justify-center gap-3 mb-3">
+          <div className="flex items-center justify-center gap-3 mb-2">
             <div className="flex gap-1">
               <span className="w-2 h-2 rounded-full bg-primary animate-pulse-dot" />
               <span className="w-2 h-2 rounded-full bg-primary animate-pulse-dot" style={{ animationDelay: "0.3s" }} />
@@ -51,15 +44,18 @@ export default function ProgressBar({ progress, step, status, position }: Progre
   }
 
   const isDone = status === "done";
-  // index of the stage we're currently inside
+
+  // Which stage are we inside, based on live progress?
   let activeIdx = 0;
   for (let i = 0; i < STAGES.length; i++) {
     if (progress >= STAGES[i].from) activeIdx = i;
   }
-  if (isDone) activeIdx = STAGES.length;
 
-  // live detail, e.g. "parsing files (380/1240)"
-  const detail = step && step !== "processing" ? step : "";
+  // Live detail from the backend, e.g. "parsing files (380/1240)".
+  const detail = step && step !== "processing" && step !== "Starting..." ? step : "";
+  const label = isDone ? "Analysis complete" : STAGES[activeIdx].label;
+  // key changes whenever the line text changes → re-mounts → fade animation.
+  const lineKey = isDone ? "done" : `${activeIdx}|${detail}`;
 
   return (
     <div className="w-full max-w-2xl mx-auto mt-8 animate-in fade-in">
@@ -82,50 +78,33 @@ export default function ProgressBar({ progress, step, status, position }: Progre
           </div>
         </div>
 
-        {/* Stage list */}
-        <ol className="space-y-2">
-          {STAGES.map((s, i) => {
-            const stageDone = isDone || i < activeIdx;
-            const stageActive = !isDone && i === activeIdx;
-            return (
-              <li key={s.key} className="flex items-center gap-3 text-sm">
-                <span
-                  className={`w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 transition-colors ${
-                    stageDone
-                      ? "bg-green-500/20 text-green-400"
-                      : stageActive
-                        ? "bg-primary/20 text-primary"
-                        : "bg-background text-muted/40"
-                  }`}
-                >
-                  {stageDone ? (
-                    <CheckIcon />
-                  ) : stageActive ? (
-                    <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                  ) : (
-                    <span className="w-1.5 h-1.5 rounded-full bg-current" />
-                  )}
-                </span>
-                <span
-                  className={
-                    stageDone ? "text-muted line-through decoration-muted/30" : stageActive ? "text-foreground font-medium" : "text-muted/50"
-                  }
-                >
-                  {s.label}
-                </span>
-                {stageActive && detail && (
-                  <span className="text-xs text-muted font-mono truncate max-w-[16rem]">{detail}</span>
-                )}
-              </li>
-            );
-          })}
-        </ol>
+        {/* Single animated status line (ChatGPT-style) — replaces the old checklist */}
+        <div className="flex items-center gap-2.5 text-sm min-h-[22px]">
+          {isDone ? (
+            <span className="w-4 h-4 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center flex-shrink-0">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+            </span>
+          ) : (
+            <span className="w-2 h-2 rounded-full bg-primary animate-pulse-dot flex-shrink-0" />
+          )}
+
+          <span
+            key={lineKey}
+            className="animate-in fade-in slide-in-from-bottom-1 duration-300 flex items-baseline gap-2 min-w-0"
+          >
+            <span className={isDone ? "text-green-400 font-medium" : "text-foreground font-medium"}>
+              {label}
+            </span>
+            {detail && !isDone && (
+              <span className="text-xs text-muted font-mono truncate max-w-[18rem]">{detail}</span>
+            )}
+          </span>
+        </div>
 
         {isDone && (
-          <div className="mt-4 flex items-center gap-2 text-sm text-green-400">
-            <CheckIcon />
-            Opening the graph…
-          </div>
+          <p className="mt-3 text-xs text-muted">Opening the graph…</p>
         )}
       </div>
     </div>

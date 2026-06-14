@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import InputBar from "./components/InputBar";
 import ProgressBar from "./components/ProgressBar";
@@ -24,6 +24,8 @@ export default function Home() {
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [showWarning, setShowWarning] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     const checkWarning = () => {
@@ -36,7 +38,7 @@ export default function Home() {
   }, []);
 
   const isLoading =
-    status === "submitting" ||
+    submitting ||
     status === "processing" ||
     status === "queued" ||
     status === "delayed";
@@ -89,6 +91,11 @@ export default function Home() {
 
   const handleSubmit = useCallback(
     async (repoUrl: string) => {
+      // Hard guard against double-submit (rapid clicks, Enter spam, two tabs).
+      // The ref blocks re-entry synchronously; setSubmitting disables the button.
+      if (submittingRef.current) return;
+      submittingRef.current = true;
+      setSubmitting(true);
       setSubmitError(null);
       try {
         const { jobId } = await submitAnalysis(repoUrl);
@@ -97,6 +104,10 @@ export default function Home() {
         setSubmitError(
           err instanceof Error ? err.message : "Failed to submit"
         );
+      } finally {
+        // Polling status now keeps the button disabled; release the submit lock.
+        submittingRef.current = false;
+        setSubmitting(false);
       }
     },
     [startPolling]
@@ -105,6 +116,8 @@ export default function Home() {
   const handleReset = useCallback(() => {
     reset();
     setSubmitError(null);
+    submittingRef.current = false;
+    setSubmitting(false);
   }, [reset]);
 
   return (

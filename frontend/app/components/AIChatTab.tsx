@@ -149,38 +149,34 @@ function MarkdownCode({ className, children, ...props }: any) {
 // ── Streaming indicator ───────────────────────────────────────────────────────
 
 function StreamingIndicator({ phase }: { phase: number }) {
+  // Single animated line (ChatGPT-style): one chip whose label fades as the
+  // phase advances, instead of a stacked checklist.
+  const idx = Math.min(Math.max(phase, 0), STREAM_PHASES.length - 1);
+  const p = STREAM_PHASES[idx];
   return (
     <div className="flex justify-start">
-      <div className="max-w-[95%] space-y-1.5" style={{ animation: "aichat-fadein 0.2s ease-out" }}>
-        {STREAM_PHASES.map((p, i) => {
-          if (i > phase + 1) return null;
-          const isDone = i < phase;
-          const isActive = i === phase;
-
-          return (
-            <div
-              key={i}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[12px]"
-              style={{
-                background: isActive ? "rgba(99,102,241,0.08)" : "#1c2128",
-                border: `1px solid ${isActive ? "rgba(99,102,241,0.2)" : "#30363d"}`,
-                color: isDone ? "#3fb950" : isActive ? "#e6edf3" : "#8b949e",
-                animation: isDone ? "none" : "aichat-pulse 2s ease-in-out infinite",
-                opacity: isDone ? 0.6 : 1,
-              }}
-            >
-              <span className="text-[11px]">{isDone ? "✓" : p.icon}</span>
-              <span>{p.label}</span>
-              {isActive && (
-                <span className="flex gap-0.5 ml-auto">
-                  <span className="aichat-dot-1 w-1 h-1 rounded-full bg-current inline-block" />
-                  <span className="aichat-dot-2 w-1 h-1 rounded-full bg-current inline-block" />
-                  <span className="aichat-dot-3 w-1 h-1 rounded-full bg-current inline-block" />
-                </span>
-              )}
-            </div>
-          );
-        })}
+      <div
+        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-[12px]"
+        style={{
+          background: "rgba(99,102,241,0.08)",
+          border: "1px solid rgba(99,102,241,0.2)",
+          color: "#e6edf3",
+        }}
+      >
+        {/* key re-mounts on phase change → smooth fade between steps */}
+        <span
+          key={idx}
+          className="flex items-center gap-1.5"
+          style={{ animation: "aichat-fadein 0.25s ease-out" }}
+        >
+          <span className="text-[11px]">{p.icon}</span>
+          <span>{p.label}</span>
+        </span>
+        <span className="flex gap-0.5 ml-1">
+          <span className="aichat-dot-1 w-1 h-1 rounded-full bg-current inline-block" />
+          <span className="aichat-dot-2 w-1 h-1 rounded-full bg-current inline-block" />
+          <span className="aichat-dot-3 w-1 h-1 rounded-full bg-current inline-block" />
+        </span>
       </div>
     </div>
   );
